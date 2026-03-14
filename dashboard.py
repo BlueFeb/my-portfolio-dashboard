@@ -187,7 +187,7 @@ else:
         # '손익' 라벨 열만 진하게
         styles['손익'] = 'font-weight: bold;'     
         # [핵심] 숫자는 굵기 통일! 오직 (0번째 줄, '합계' 열)의 최종 수익금만 금색으로 크고 굵게 포인트!
-        styles.loc[0, '합계 (환산)'] = f'color: {gold_highlight}; font-weight: 900;'
+        styles.loc[0, '합계 (환산)'] = f'color: {gold}; font-weight: 900;'
         return styles
 
     st.dataframe(
