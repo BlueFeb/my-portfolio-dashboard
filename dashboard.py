@@ -13,7 +13,7 @@ st.set_page_config(page_title="나만의 포트폴리오", layout="wide", page_i
 # 제목과 스위치를 같은 줄에 배치하기 위해 화면을 8:2 비율로 나눕니다.
 col1, col2 = st.columns([8, 2])
 with col1:
-    st.markdown("<h2 style='margin-top: -15px;'>🌙 내 손안의 포트폴리오</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-top: -15px;'>🌟 내 포트폴리오</h2>", unsafe_allow_html=True)
 with col2:
     is_dark_mode = st.toggle("다크 모드 켜기", value=True)
 
