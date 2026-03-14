@@ -40,7 +40,7 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 구글 시트 데이터 로드 ---
+# --- 2. 데이터 로드 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -52,13 +52,11 @@ def load_data():
         SHEET_NAME = "MyPortfolio_DB" 
         sheet_tx = client.open(SHEET_NAME).worksheet("거래내역")
         sheet_history = client.open(SHEET_NAME).worksheet("일별기록")
-        
-        # 🌟 새로 만든 '실현손익' 시트도 불러옵니다
         try:
             sheet_pnl = client.open(SHEET_NAME).worksheet("실현손익")
             df_pnl = pd.DataFrame(sheet_pnl.get_all_records())
         except:
-            df_pnl = pd.DataFrame() # 시트가 없으면 빈 데이터 반환
+            df_pnl = pd.DataFrame()
             
         df_tx = pd.DataFrame(sheet_tx.get_all_records())
         df_history = pd.DataFrame(sheet_history.get_all_records())
@@ -75,10 +73,8 @@ def get_market_data(ticker):
         if not ticker: return 0.0, 0.0
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d").dropna(subset=['Close'])
-        if len(hist) >= 2:
-            return float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
-        elif len(hist) == 1:
-            return float(hist['Close'].iloc[0]), 0.0
+        if len(hist) >= 2: return float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
+        elif len(hist) == 1: return float(hist['Close'].iloc[0]), 0.0
         return 0.0, 0.0
     except: return 0.0, 0.0
 
@@ -126,36 +122,52 @@ else:
     st.metric(label="💰 총 자산 (원화 환산)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
     st.markdown("---")
 
-    # 🌟 [신규] 실현 손익 탭 화면
-    st.markdown("**💸 실현 손익 (매도 수익 달력)**")
+    # 🌟 [업그레이드] 실현 손익 및 배당금 분리 화면
+    st.markdown("**💸 실현 손익 및 배당금 달력**")
     
     if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
+        # 💡 예전 데이터도 완벽 호환 (분류가 비어있으면 수량을 보고 배당/매도를 스스로 판단)
+        if '분류' not in df_pnl.columns:
+            df_pnl['분류'] = ''
+        df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x['분류']).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
+        
         df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'])
+        df_pnl['일자'] = df_pnl['날짜'].dt.strftime('%m-%d')
         df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
         df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
 
-        # 스마트폰에서 누르기 편한 3개의 탭 생성
-        tab1, tab2, tab3 = st.tabs(["일별 수익", "월별 수익", "연별 수익"])
+        # 📊 수익과 배당금을 분리해서 집계
+        total_sell_profit = df_pnl[df_pnl['분류'] == '매도']['실현손익(원)'].sum()
+        total_dividend = df_pnl[df_pnl['분류'] == '배당']['실현손익(원)'].sum()
+        
+        # 보기 좋게 두 칸으로 나눕니다.
+        c1, c2 = st.columns(2)
+        c1.metric("📉 누적 매도 손익", f"{int(total_sell_profit):,} 원")
+        c2.metric("🎁 누적 배당금", f"{int(total_dividend):,} 원")
+        
+        tab1, tab2, tab3 = st.tabs(["일별", "월별", "연별"])
 
-        def plot_pnl_bar(data, x_col, title):
-            # 값이 양수면 빨강계열(파스텔), 음수면 파랑계열(파스텔) 지정
-            colors = [profit_up_color if val > 0 else profit_down_color for val in data['실현손익(원)']]
-            fig = px.bar(data, x=x_col, y='실현손익(원)', text_auto='.2s')
-            fig.update_traces(marker_color=colors, textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
-            fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
+        # 🎨 색상: 배당금은 황금색, 매도수익은 빨강, 매도손실은 파랑
+        def plot_pnl_bar(data, x_col):
+            data['색상분류'] = data.apply(lambda x: '배당금 (노랑)' if x['분류'] == '배당' else ('매도 수익 (빨강)' if x['실현손익(원)'] > 0 else '매도 손실 (파랑)'), axis=1)
+            color_map = {'배당금 (노랑)': '#FFD700', '매도 수익 (빨강)': profit_up_color, '매도 손실 (파랑)': profit_down_color}
+            
+            fig = px.bar(data, x=x_col, y='실현손익(원)', color='색상분류', text_auto='.2s', color_discrete_map=color_map)
+            fig.update_traces(textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
+            fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
             st.plotly_chart(fig, use_container_width=True)
 
         with tab1:
-            daily_pnl = df_pnl.groupby(df_pnl['날짜'].dt.strftime('%m-%d'))['실현손익(원)'].sum().reset_index()
-            plot_pnl_bar(daily_pnl, '날짜', '일별')
+            daily_pnl = df_pnl.groupby(['일자', '분류'])['실현손익(원)'].sum().reset_index()
+            plot_pnl_bar(daily_pnl, '일자')
         with tab2:
-            monthly_pnl = df_pnl.groupby('월')['실현손익(원)'].sum().reset_index()
-            plot_pnl_bar(monthly_pnl, '월', '월별')
+            monthly_pnl = df_pnl.groupby(['월', '분류'])['실현손익(원)'].sum().reset_index()
+            plot_pnl_bar(monthly_pnl, '월')
         with tab3:
-            yearly_pnl = df_pnl.groupby('연')['실현손익(원)'].sum().reset_index()
-            plot_pnl_bar(yearly_pnl, '연', '연별')
+            yearly_pnl = df_pnl.groupby(['연', '분류'])['실현손익(원)'].sum().reset_index()
+            plot_pnl_bar(yearly_pnl, '연')
     else:
-        st.caption("아직 매도 기록(실현손익)이 없습니다.")
+        st.caption("아직 매도/배당 기록이 없습니다.")
 
     st.markdown("---")
 
