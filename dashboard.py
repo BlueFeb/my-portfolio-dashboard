@@ -11,7 +11,7 @@ st.set_page_config(page_title="나만의 포트폴리오", layout="wide", page_i
 
 col1, col2 = st.columns([8, 2])
 with col1:
-    st.markdown("<h2 style='margin-top: -15px;'>🌙 내 포트폴리오</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-top: -15px;'>🌙 내 손안의 포트폴리오</h2>", unsafe_allow_html=True)
 with col2:
     is_dark_mode = st.toggle("다크 모드 켜기", value=True)
 
@@ -122,11 +122,10 @@ else:
     st.metric(label="💰 총 자산 (원화 환산)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
     st.markdown("---")
 
-    # 🌟 [업그레이드] 실현 손익 및 배당금 분리 화면
+    # 🌟 실현 손익 및 배당금 달력
     st.markdown("**💸 실현 손익 및 배당금 달력**")
     
     if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
-        # 💡 예전 데이터도 완벽 호환 (분류가 비어있으면 수량을 보고 배당/매도를 스스로 판단)
         if '분류' not in df_pnl.columns:
             df_pnl['분류'] = ''
         df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x['분류']).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
@@ -136,18 +135,15 @@ else:
         df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
         df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
 
-        # 📊 수익과 배당금을 분리해서 집계
         total_sell_profit = df_pnl[df_pnl['분류'] == '매도']['실현손익(원)'].sum()
         total_dividend = df_pnl[df_pnl['분류'] == '배당']['실현손익(원)'].sum()
         
-        # 보기 좋게 두 칸으로 나눕니다.
         c1, c2 = st.columns(2)
         c1.metric("📉 누적 매도 손익", f"{int(total_sell_profit):,} 원")
         c2.metric("🎁 누적 배당금", f"{int(total_dividend):,} 원")
         
         tab1, tab2, tab3 = st.tabs(["일별", "월별", "연별"])
 
-        # 🎨 색상: 배당금은 황금색, 매도수익은 빨강, 매도손실은 파랑
         def plot_pnl_bar(data, x_col):
             data['색상분류'] = data.apply(lambda x: '배당금 (노랑)' if x['분류'] == '배당' else ('매도 수익 (빨강)' if x['실현손익(원)'] > 0 else '매도 손실 (파랑)'), axis=1)
             color_map = {'배당금 (노랑)': '#FFD700', '매도 수익 (빨강)': profit_up_color, '매도 손실 (파랑)': profit_down_color}
@@ -196,3 +192,15 @@ else:
         .map(style_table, subset=['수익률', '손익']),
         use_container_width=True, hide_index=True
     )
+
+    st.markdown("---")
+
+    # 🌟 가출했다가 무사히 돌아온 '일별 자산 추이 그래프'
+    st.markdown("**📈 자산 총액 변동 추이**")
+    if not df_history.empty:
+        fig3 = px.line(df_history, x='날짜', y=df_history.columns[1], markers=True)
+        fig3.update_traces(line_color=line_color, marker_color=line_color)
+        fig3.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.caption("아직 '일별기록' 시트에 데이터가 없습니다. (오늘 밤 11시 30분 이후에 첫 그래프가 그려집니다!)")
