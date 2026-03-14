@@ -168,7 +168,7 @@ else:
         total_realized_krw = t_sell_krw + t_sell_usd_krw + t_div_krw + t_div_usd_krw
 
     # =========================================================
-    # 🌟 [수정] 콤팩트 실현손익 요약 표 (숫자 폰트/크기 통일, 합계만 금색 강조)
+    # 🌟 콤팩트 실현손익 요약 표 (볼드 제거, 오직 색상만 금색으로!)
     # =========================================================
     st.markdown("**💸 실현 손익 및 배당금 요약** <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
     
@@ -182,12 +182,10 @@ else:
     df_summary = pd.DataFrame(summary_data)
     
     def style_summary(x):
-        # 모든 폰트 크기/굵기를 초기화(동일하게 유지)할 스타일 빈 프레임 생성
         styles = pd.DataFrame('', index=x.index, columns=x.columns)
-        # '손익' 라벨 열만 진하게
         styles['손익'] = 'font-weight: bold;'     
-        # [핵심] 숫자는 굵기 통일! 오직 (0번째 줄, '합계' 열)의 최종 수익금만 금색으로 크고 굵게 포인트!
-        styles.loc[0, '합계 (환산)'] = f'color: {gold}; font-weight: 900;'
+        # [수정됨] 굵기(font-weight)는 건드리지 않고, 오직 색상(color)만 금색으로 변경합니다.
+        styles.loc[0, '합계 (환산)'] = f'color: {gold_highlight};'
         return styles
 
     st.dataframe(
@@ -208,6 +206,7 @@ else:
 
     with tab_chart1:
         pc1, pc2 = st.columns(2)
+        
         text_font_setting = dict(color='black', size=20, family="sans-serif")
         
         with pc1:
