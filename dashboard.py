@@ -9,14 +9,12 @@ import json
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="나만의 포트폴리오", layout="wide", page_icon="🌙")
 
-# --- 2. 🌟 모드 전환 스위치 및 테마 디자인 설정 ---
 col1, col2 = st.columns([8, 2])
 with col1:
-    st.markdown("<h2 style='margin-top: -15px;'>🌟 내 포트폴리오</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-top: -15px;'>🌙 내 포트폴리오</h2>", unsafe_allow_html=True)
 with col2:
     is_dark_mode = st.toggle("다크 모드 켜기", value=True)
 
-# 모드에 따른 컬러 스킴 세팅
 if is_dark_mode:
     bg_color, text_color = "#1E1E1E", "#F0F2F6"
     df_bg, df_text = "#2A2A2A", "#FFFFFF"
@@ -42,8 +40,7 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-
-# --- 3. 구글 시트 데이터 로드 ---
+# --- 2. 구글 시트 데이터 로드 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -56,16 +53,22 @@ def load_data():
         sheet_tx = client.open(SHEET_NAME).worksheet("거래내역")
         sheet_history = client.open(SHEET_NAME).worksheet("일별기록")
         
+        # 🌟 새로 만든 '실현손익' 시트도 불러옵니다
+        try:
+            sheet_pnl = client.open(SHEET_NAME).worksheet("실현손익")
+            df_pnl = pd.DataFrame(sheet_pnl.get_all_records())
+        except:
+            df_pnl = pd.DataFrame() # 시트가 없으면 빈 데이터 반환
+            
         df_tx = pd.DataFrame(sheet_tx.get_all_records())
         df_history = pd.DataFrame(sheet_history.get_all_records())
-        return df_tx, df_history
+        return df_tx, df_history, df_pnl
     except Exception as e:
         st.error(f"⚠️ 데이터 로드 중 오류 발생: {e}")
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-df, df_history = load_data()
+df, df_history, df_pnl = load_data()
 
-# --- 4. 실시간 가격 정보 가져오기 ---
 @st.cache_data(ttl=60)
 def get_market_data(ticker):
     try:
@@ -73,19 +76,14 @@ def get_market_data(ticker):
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d").dropna(subset=['Close'])
         if len(hist) >= 2:
-            current_price = float(hist['Close'].iloc[-1])
-            prev_price = float(hist['Close'].iloc[-2])
-            daily_change = ((current_price - prev_price) / prev_price) * 100
-            return current_price, daily_change
+            return float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
         elif len(hist) == 1:
             return float(hist['Close'].iloc[0]), 0.0
         return 0.0, 0.0
-    except Exception:
-        return 0.0, 0.0
+    except: return 0.0, 0.0
 
-# --- 5. 메인 화면 출력 ---
 if df.empty:
-    st.info("아직 거래 내역이 없습니다. 텔레그램으로 거래를 기록해주세요!")
+    st.info("아직 거래 내역이 없습니다.")
 else:
     df['계산용수량'] = df.apply(lambda x: x['수량'] if x['거래종류'] == '매수' else -x['수량'], axis=1)
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
@@ -107,7 +105,6 @@ else:
     for index, row in holdings.iterrows():
         current_price, _ = get_market_data(row['티커'])
         realtime_prices.append(current_price)
-        
         rate = usd_krw_price if row['통화'] == "USD" else 1
         eval_krw = current_price * row['계산용수량'] * rate 
         cost_krw = row['평균매입단가'] * row['계산용수량'] * rate     
@@ -117,50 +114,62 @@ else:
         profit_amounts.append(eval_krw - cost_krw)
         profit_pcts.append(((current_price - row['평균매입단가']) / row['평균매입단가'] * 100) if row['평균매입단가'] > 0 else 0.0)
 
-    holdings['현재가'] = realtime_prices
     holdings['평가금액(원)'] = total_values_krw
     holdings['평가손익(원)'] = profit_amounts
     holdings['수익률(%)'] = profit_pcts
 
-    # 총 자산 지표 
     total_asset = sum(total_values_krw)
     total_cost = sum(total_costs_krw)
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
-    st.metric(
-        label="💰 총 자산 (원화 환산)", 
-        value=f"{total_asset:,.0f} 원", 
-        delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)"
-    )
+    st.metric(label="💰 총 자산 (원화 환산)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
     st.markdown("---")
 
-    # 차트 출력
-    st.markdown("**🥧 자산군 및 종목 비중**")
+    # 🌟 [신규] 실현 손익 탭 화면
+    st.markdown("**💸 실현 손익 (매도 수익 달력)**")
     
+    if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
+        df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'])
+        df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
+        df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
+
+        # 스마트폰에서 누르기 편한 3개의 탭 생성
+        tab1, tab2, tab3 = st.tabs(["일별 수익", "월별 수익", "연별 수익"])
+
+        def plot_pnl_bar(data, x_col, title):
+            # 값이 양수면 빨강계열(파스텔), 음수면 파랑계열(파스텔) 지정
+            colors = [profit_up_color if val > 0 else profit_down_color for val in data['실현손익(원)']]
+            fig = px.bar(data, x=x_col, y='실현손익(원)', text_auto='.2s')
+            fig.update_traces(marker_color=colors, textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
+            fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab1:
+            daily_pnl = df_pnl.groupby(df_pnl['날짜'].dt.strftime('%m-%d'))['실현손익(원)'].sum().reset_index()
+            plot_pnl_bar(daily_pnl, '날짜', '일별')
+        with tab2:
+            monthly_pnl = df_pnl.groupby('월')['실현손익(원)'].sum().reset_index()
+            plot_pnl_bar(monthly_pnl, '월', '월별')
+        with tab3:
+            yearly_pnl = df_pnl.groupby('연')['실현손익(원)'].sum().reset_index()
+            plot_pnl_bar(yearly_pnl, '연', '연별')
+    else:
+        st.caption("아직 매도 기록(실현손익)이 없습니다.")
+
+    st.markdown("---")
+
+    st.markdown("**🥧 자산군 및 종목 비중**")
     fig1 = px.pie(holdings.groupby('자산군')['평가금액(원)'].sum().reset_index(), values='평가금액(원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
     fig1.update_traces(textposition='inside', textinfo='percent+label', textfont_size=15)
     fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
     st.plotly_chart(fig1, use_container_width=True)
 
-    fig2 = px.pie(holdings, values='평가금액(원)', names='종목명', color_discrete_sequence=pastel_colors)
-    fig2.update_traces(textposition='inside', textinfo='percent+label', textfont_size=13)
-    fig2.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-    st.plotly_chart(fig2, use_container_width=True)
-
     st.markdown("---")
 
-    # 🌟 테이블 출력 (열 이름 압축 & 폰트 축소 & 정렬 기능 강조)
-    st.markdown("**📋 보유 자산 상세 (열 제목을 터치하면 정렬됩니다 ↕️)**")
-    
-    # 가로 스크롤 방지를 위해 열 이름을 아주 짧게 변경하고 '평가손익(원)'을 추가
+    st.markdown("**📋 보유 자산 상세 (열 제목 터치 시 정렬 ↕️)**")
     display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가금액(원)', '평가손익(원)']].copy()
-    display_df.rename(columns={
-        '계산용수량': '수량', 
-        '수익률(%)': '수익률', 
-        '평가금액(원)': '평가액', 
-        '평가손익(원)': '손익'
-    }, inplace=True)
+    display_df.rename(columns={'계산용수량': '수량', '수익률(%)': '수익률', '평가금액(원)': '평가액', '평가손익(원)': '손익'}, inplace=True)
 
     def style_table(val):
         if isinstance(val, (int, float)):
@@ -170,19 +179,8 @@ else:
 
     st.dataframe(
         display_df.style
-        .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'}) # 폰트 크기 12px로 축소
+        .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'})
         .format({'수량': '{:,.1f}', '수익률': '{:,.2f}%', '평가액': '{:,.0f}', '손익': '{:,.0f}'})
         .map(style_table, subset=['수익률', '손익']),
-        use_container_width=True, 
-        hide_index=True
+        use_container_width=True, hide_index=True
     )
-
-    st.markdown("---")
-
-    # 자산 추이 그래프
-    st.markdown("**📈 자산 총액 변동 추이**")
-    if not df_history.empty:
-        fig3 = px.line(df_history, x='날짜', y=df_history.columns[1], markers=True)
-        fig3.update_traces(line_color=line_color, marker_color=line_color)
-        fig3.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig3, use_container_width=True)
