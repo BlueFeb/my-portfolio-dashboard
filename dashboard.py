@@ -113,7 +113,6 @@ else:
     holdings['평가액(원)'] = total_values_krw
     holdings['손익(원)'] = profit_amounts
     holdings['수익률(%)'] = profit_pcts
-    
     holdings['평가액(만원)'] = (pd.Series(total_values_krw) / 10000).astype(int)
 
     total_asset = sum(total_values_krw)
@@ -125,71 +124,103 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 실현 손익 달력 (에러 완벽 방지)
+    # 🌟 실현 손익 및 배당금 달력 (오늘 환율 적용 4분할 모드)
     # =========================================================
-    st.markdown("**💸 실현 손익 및 배당금 달력**")
-    
     if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
+        # 빈칸 방지 및 옛날 데이터 호환
         if '분류' not in df_pnl.columns: df_pnl['분류'] = ''
-        if '통화' not in df_pnl.columns: df_pnl['통화'] = 'KRW'
+        if '통화' not in df_pnl.columns: df_pnl['통화'] = ''
         if '실현손익(달러)' not in df_pnl.columns: df_pnl['실현손익(달러)'] = 0.0
         
-        # 🌟 에러 해결의 핵심: 빈칸이나 문자가 섞여 있으면 무조건 0으로 강제 변환
         df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
         df_pnl['실현손익(달러)'] = pd.to_numeric(df_pnl['실현손익(달러)'], errors='coerce').fillna(0)
 
         df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x['분류']).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
         
-        df_pnl['실현손익(외화)'] = df_pnl['실현손익(달러)']
-        df_pnl['실현손익(만원)'] = (df_pnl['실현손익(원)'] / 10000).astype(int)
+        # 종목의 통화(KRW/USD) 복구 (과거 기록 호환용)
+        currency_map = df.drop_duplicates('티커').set_index('티커')['통화'].to_dict()
+        df_pnl['통화'] = df_pnl.apply(lambda x: x['통화'] if str(x['통화']).strip() != '' else currency_map.get(x['티커'], 'KRW'), axis=1)
+        
+        # 🌟 달러 기록을 오늘 환율 기준으로 원화 변환하는 핵심 로직
+        def calculate_today_krw(row):
+            krw = row['실현손익(원)']
+            usd = row['실현손익(달러)']
+            curr = row['통화']
+            
+            if curr == 'USD':
+                if usd == 0 and krw != 0:
+                    usd = krw / 1350.0  # 달러 기록이 누락된 아주 옛날 데이터를 위한 예비 조치
+                today_krw = usd * usd_krw_price
+                return usd, today_krw
+            else:
+                return 0.0, krw
+
+        df_pnl[['실현손익(외화)', '현재환율적용_실현손익(원)']] = df_pnl.apply(lambda row: pd.Series(calculate_today_krw(row)), axis=1)
+        
+        # 차트용 데이터 (4분할 카테고리 생성 & 만원 단위 절삭)
+        df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'국내' if x['통화']=='KRW' else '해외'})", axis=1)
+        df_pnl['실현손익_차트용(만원)'] = (df_pnl['현재환율적용_실현손익(원)'] / 10000).astype(int)
         
         df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'])
         df_pnl['일자'] = df_pnl['날짜'].dt.strftime('%m-%d')
         df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
         df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
 
-        # 통화별 집계
-        t_sell_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'KRW')]['실현손익(원)'].sum()
-        t_sell_usd = df_pnl[(df_pnl['분류'] == '매도')]['실현손익(외화)'].sum()
-        t_div_krw = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'KRW')]['실현손익(원)'].sum()
-        t_div_usd = df_pnl[(df_pnl['분류'] == '배당')]['실현손익(외화)'].sum()
+        # 통화별 집계 (오늘 환율이 곱해진 KRW 값)
+        t_sell_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'KRW')]['현재환율적용_실현손익(원)'].sum()
+        t_sell_usd_val = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'USD')]['실현손익(외화)'].sum()
+        t_sell_usd_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'USD')]['현재환율적용_실현손익(원)'].sum()
+        
+        t_div_krw = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'KRW')]['현재환율적용_실현손익(원)'].sum()
+        t_div_usd_val = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'USD')]['실현손익(외화)'].sum()
+        t_div_usd_krw = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'USD')]['현재환율적용_실현손익(원)'].sum()
+        
+        total_realized_krw = t_sell_krw + t_sell_usd_krw + t_div_krw + t_div_usd_krw
+
+        # 🌟 UI 출력부
+        st.markdown(f"<h3 style='color:{profit_up_color};'>💸 총 실현손익 합계: {int(total_realized_krw):,.0f} 원 <span style='font-size:15px; color:gray;'>(오늘 환율 적용)</span></h3>", unsafe_allow_html=True)
         
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📉 매도 수익 (국내)", f"{int(t_sell_krw):,.0f} 원")
-        c2.metric("📉 매도 수익 (해외)", f"${t_sell_usd:,.2f}")
-        c3.metric("🎁 배당금 (국내)", f"{int(t_div_krw):,.0f} 원")
-        c4.metric("🎁 배당금 (해외)", f"${t_div_usd:,.2f}")
+        c1.metric("📉 매도 (국내)", f"{int(t_sell_krw):,.0f} 원")
+        c2.metric("📉 매도 (해외)", f"${t_sell_usd_val:,.2f}", delta=f"{int(t_sell_usd_krw):,.0f} 원", delta_color="off")
+        c3.metric("🎁 배당 (국내)", f"{int(t_div_krw):,.0f} 원")
+        c4.metric("🎁 배당 (해외)", f"${t_div_usd_val:,.2f}", delta=f"{int(t_div_usd_krw):,.0f} 원", delta_color="off")
         
-        st.caption("※ 아래 차트는 비중 파악을 위해 **원화 환산(만 원)** 기준으로 통합되어 표시됩니다.")
+        st.caption("※ 아래 차트는 크기 비교를 위해 **원화 환산(만 원)** 기준으로 통합되어 표시됩니다.")
         tab1, tab2, tab3 = st.tabs(["일별 (만원)", "월별 (만원)", "연별 (만원)"])
 
         def plot_pnl_bar(data, x_col):
-            data['색상분류'] = data.apply(lambda x: '배당금 (노랑)' if x['분류'] == '배당' else ('매도 수익 (빨강)' if x['실현손익(만원)'] > 0 else '매도 손실 (파랑)'), axis=1)
-            color_map = {'배당금 (노랑)': '#FFD700', '매도 수익 (빨강)': profit_up_color, '매도 손실 (파랑)': profit_down_color}
-            
-            fig = px.bar(data, x=x_col, y='실현손익(만원)', color='색상분류', text='실현손익(만원)', color_discrete_map=color_map)
+            # 4가지 색상 명확하게 분리 (파스텔톤 계열)
+            color_map = {
+                '매도 (국내)': '#FF6B6B', # 붉은색
+                '매도 (해외)': '#FFA07A', # 주황/연어색
+                '배당 (국내)': '#4DABF7', # 푸른색
+                '배당 (해외)': '#51CF66'  # 녹색
+            }
+            fig = px.bar(data, x=x_col, y='실현손익_차트용(만원)', color='차트분류', text='실현손익_차트용(만원)', color_discrete_map=color_map)
             fig.update_traces(texttemplate='%{text:,.0f}', textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
             fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
             st.plotly_chart(fig, use_container_width=True)
 
         with tab1:
-            daily_pnl = df_pnl.groupby(['일자', '분류'])['실현손익(만원)'].sum().reset_index()
+            daily_pnl = df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index()
             plot_pnl_bar(daily_pnl, '일자')
         with tab2:
-            monthly_pnl = df_pnl.groupby(['월', '분류'])['실현손익(만원)'].sum().reset_index()
+            monthly_pnl = df_pnl.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index()
             plot_pnl_bar(monthly_pnl, '월')
         with tab3:
-            yearly_pnl = df_pnl.groupby(['연', '분류'])['실현손익(만원)'].sum().reset_index()
+            yearly_pnl = df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index()
             plot_pnl_bar(yearly_pnl, '연')
 
-        # 🌟 달러 수익이 찍히는 상세 내역 표
+        # 🌟 상세 영수증
         with st.expander("📝 실현 손익 및 배당금 상세 내역 (영수증)"):
-            display_pnl = df_pnl[['날짜', '분류', '종목명', '통화', '실현손익(외화)', '실현손익(원)']].copy()
+            display_pnl = df_pnl[['날짜', '차트분류', '종목명', '통화', '실현손익(외화)', '현재환율적용_실현손익(원)']].copy()
             display_pnl['날짜'] = display_pnl['날짜'].dt.strftime('%Y-%m-%d')
             display_pnl.sort_values('날짜', ascending=False, inplace=True)
             
             display_pnl['달러수익'] = display_pnl.apply(lambda x: f"${x['실현손익(외화)']:,.2f}" if x['통화'] == 'USD' else "-", axis=1)
-            display_pnl = display_pnl[['날짜', '분류', '종목명', '달러수익', '실현손익(원)']]
+            display_pnl.rename(columns={'현재환율적용_실현손익(원)': '실현손익(오늘환율 적용)'}, inplace=True)
+            display_pnl = display_pnl[['날짜', '차트분류', '종목명', '달러수익', '실현손익(오늘환율 적용)']]
             
             def style_pnl(val):
                 if isinstance(val, (int, float)):
@@ -200,8 +231,8 @@ else:
             st.dataframe(
                 display_pnl.style
                 .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'})
-                .format({'실현손익(원)': '{:,.0f} 원'})
-                .map(style_pnl, subset=['실현손익(원)']),
+                .format({'실현손익(오늘환율 적용)': '{:,.0f} 원'})
+                .map(style_pnl, subset=['실현손익(오늘환율 적용)']),
                 use_container_width=True, hide_index=True
             )
 
