@@ -6,7 +6,7 @@ import plotly.express as px
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- 1. 기본 설정 (아이콘 및 제목 변경) ---
+# --- 1. 기본 설정 (아이콘 및 제목) ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
 col1, col2 = st.columns([8, 2])
@@ -37,7 +37,6 @@ st.markdown(f"""
         color: {text_color} !important;
     }}
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
-    /* 탭 디자인을 더 콤팩트하게 */
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
     </style>
@@ -84,7 +83,6 @@ def get_market_data(ticker):
 if df.empty:
     st.info("아직 거래 내역이 없습니다.")
 else:
-    # 데이터 전처리
     df['계산용수량'] = df.apply(lambda x: x['수량'] if x['거래종류'] == '매수' else -x['수량'], axis=1)
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
     holdings = holdings[holdings['계산용수량'] > 0].copy()
@@ -122,10 +120,9 @@ else:
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
-    # 🌟 최상단 KPI 지표
     st.metric(label="💰 총 자산 (원)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
 
-    # 🌟 실현 손익 데이터 처리
+    # 실현 손익 데이터 처리
     t_sell_krw, t_sell_usd_val, t_sell_usd_krw = 0, 0.0, 0
     t_div_krw, t_div_usd_val, t_div_usd_krw = 0, 0.0, 0
     total_realized_krw = 0
@@ -185,12 +182,36 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 [혁신 1] 차트 분석 탭 (스크롤 제로화)
+    # 🌟 차트 분석 탭 (자산 비중을 첫 번째 탭으로 변경)
     # =========================================================
     st.markdown("**📊 포트폴리오 시각화**")
-    tab_chart1, tab_chart2, tab_chart3 = st.tabs(["📈 자산 추이", "🥧 자산 비중", "📊 실현 손익"])
+    
+    # 탭 순서 변경: 자산 비중 -> 자산 추이 -> 실현 손익
+    tab_chart1, tab_chart2, tab_chart3 = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익"])
 
     with tab_chart1:
+        pc1, pc2 = st.columns(2)
+        
+        # 🌟 글자색 검정(black), 폰트 크기 20(1.5배) 설정
+        text_font_setting = dict(color='black', size=20, family="sans-serif")
+        
+        with pc1:
+            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 자산군별 비중 ]</div>", unsafe_allow_html=True)
+            fig1 = px.pie(holdings.groupby('자산군')['평가액(만원)'].sum().reset_index(), values='평가액(만원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
+            # <b> 태그를 사용해 강제로 굵은 볼드체(Bold) 적용
+            fig1.update_traces(textposition='inside', texttemplate='<b>%{label}</b><br><b>%{percent:.1%}</b>', textfont=text_font_setting)
+            fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with pc2:
+            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 개별 종목별 비중 ]</div>", unsafe_allow_html=True)
+            fig2 = px.pie(holdings, values='평가액(만원)', names='종목명', hole=0.4, color_discrete_sequence=pastel_colors)
+            # <b> 태그를 사용해 강제로 굵은 볼드체(Bold) 적용
+            fig2.update_traces(textposition='inside', texttemplate='<b>%{label}</b><br><b>%{percent:.1%}</b>', textfont=text_font_setting)
+            fig2.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    with tab_chart2:
         if not df_history.empty:
             df_history['총자산(만원)'] = (df_history[df_history.columns[1]] / 10000).astype(int)
             fig_line = px.line(df_history, x='날짜', y='총자산(만원)', markers=True)
@@ -199,27 +220,6 @@ else:
             st.plotly_chart(fig_line, use_container_width=True)
         else:
             st.caption("아직 '일별기록' 시트에 데이터가 없습니다.")
-
-    with tab_chart2:
-        # 모바일에서는 세로로, PC에서는 가로로 자동 정렬
-        pc1, pc2 = st.columns(2)
-        
-        # 🌟 혁신 2: 텍스트 폰트 색상을 진한 먹색(#1A1A1A)으로 강제 고정하여 시인성 극대화
-        text_font_setting = dict(color='#1A1A1A', size=13, family="sans-serif")
-        
-        with pc1:
-            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 자산군별 비중 ]</div>", unsafe_allow_html=True)
-            fig1 = px.pie(holdings.groupby('자산군')['평가액(만원)'].sum().reset_index(), values='평가액(만원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
-            fig1.update_traces(textposition='inside', textinfo='percent+label', textfont=text_font_setting)
-            fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig1, use_container_width=True)
-            
-        with pc2:
-            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 개별 종목별 비중 ]</div>", unsafe_allow_html=True)
-            fig2 = px.pie(holdings, values='평가액(만원)', names='종목명', hole=0.4, color_discrete_sequence=pastel_colors)
-            fig2.update_traces(textposition='inside', textinfo='percent+label', textfont=text_font_setting)
-            fig2.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig2, use_container_width=True)
 
     with tab_chart3:
         if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
@@ -244,7 +244,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 [혁신 3] 상세 데이터 탭 (깔끔한 표 정리)
+    # 🌟 상세 데이터 탭 
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2 = st.tabs(["📊 보유 자산 상세", "🧾 실현 손익 영수증"])
