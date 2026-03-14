@@ -110,7 +110,6 @@ else:
         profit_amounts.append(eval_krw - cost_krw)
         profit_pcts.append(((current_price - row['평균매입단가']) / row['평균매입단가'] * 100) if row['평균매입단가'] > 0 else 0.0)
 
-    # 표(텍스트)에 띄울 원 단위 데이터
     holdings['평가액(원)'] = total_values_krw
     holdings['손익(원)'] = profit_amounts
     holdings['수익률(%)'] = profit_pcts
@@ -126,21 +125,22 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 실현 손익 달력 (시트에 저장된 정확한 통화 읽기)
+    # 🌟 실현 손익 달력 (에러 완벽 방지)
     # =========================================================
     st.markdown("**💸 실현 손익 및 배당금 달력**")
     
     if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
-        # 빈칸 방지 및 옛날 데이터 호환
         if '분류' not in df_pnl.columns: df_pnl['분류'] = ''
         if '통화' not in df_pnl.columns: df_pnl['통화'] = 'KRW'
         if '실현손익(달러)' not in df_pnl.columns: df_pnl['실현손익(달러)'] = 0.0
         
+        # 🌟 에러 해결의 핵심: 빈칸이나 문자가 섞여 있으면 무조건 0으로 강제 변환
+        df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
+        df_pnl['실현손익(달러)'] = pd.to_numeric(df_pnl['실현손익(달러)'], errors='coerce').fillna(0)
+
         df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x['분류']).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
         
-        # 🌟 이제 시트에 있는 '실현손익(달러)'를 그대로 가져와서 씁니다. (환율 왜곡 0%)
         df_pnl['실현손익(외화)'] = df_pnl['실현손익(달러)']
-        
         df_pnl['실현손익(만원)'] = (df_pnl['실현손익(원)'] / 10000).astype(int)
         
         df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'])
