@@ -14,8 +14,8 @@ st.markdown("<h2 style='text-align: center;'>🌙 내 손안의 포트폴리오<
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # Streamlit Advanced Settings에 넣은 Secrets 데이터를 가져옵니다.
-        creds = ServiceAccountCredentials.from_json_key(dict(st.secrets), scope)
+        # 🌟 수정된 부분: from_json_key -> from_json_keyfile_dict
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets), scope)
         client = gspread.authorize(creds)
         
         SHEET_NAME = "MyPortfolio_DB" 
