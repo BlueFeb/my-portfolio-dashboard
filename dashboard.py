@@ -22,6 +22,7 @@ if is_dark_mode:
     pastel_colors = ['#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF', '#E8BAFF']
     line_color = '#FF99CC'
     profit_up_color, profit_down_color = '#FF9999', '#99CCFF' 
+    gold_highlight = '#FFD700' # 다크모드용 밝은 황금색
 else:
     bg_color, text_color = "#F8F9FA", "#212529"
     df_bg, df_text = "#FFFFFF", "#212529"
@@ -29,6 +30,7 @@ else:
     pastel_colors = ['#FF8A98', '#FFB677', '#E5E570', '#85E39C', '#8AC4FF', '#C785FF']
     line_color = '#FF6699'
     profit_up_color, profit_down_color = '#E63946', '#457B9D'
+    gold_highlight = '#B8860B' # 라이트모드용 진한 황금색
 
 st.markdown(f"""
     <style>
@@ -166,11 +168,10 @@ else:
         total_realized_krw = t_sell_krw + t_sell_usd_krw + t_div_krw + t_div_usd_krw
 
     # =========================================================
-    # 🌟 [수정] 콤팩트 실현손익 요약 표 (합계 맨 앞, 폰트 크기 15px 통일)
+    # 🌟 [수정] 콤팩트 실현손익 요약 표 (숫자 폰트/크기 통일, 합계만 금색 강조)
     # =========================================================
     st.markdown("**💸 실현 손익 및 배당금 요약** <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
     
-    # 🌟 합계(환산)을 맨 앞으로 당겼습니다.
     summary_data = {
         "손익": ["💡 총계", "📉 매도", "🎁 배당"],
         "합계 (환산)": [f"{int(total_realized_krw):,.0f}", f"{int(t_sell_krw + t_sell_usd_krw):,.0f}", f"{int(t_div_krw + t_div_usd_krw):,.0f}"],
@@ -181,12 +182,14 @@ else:
     df_summary = pd.DataFrame(summary_data)
     
     def style_summary(x):
+        # 모든 폰트 크기/굵기를 초기화(동일하게 유지)할 스타일 빈 프레임 생성
         styles = pd.DataFrame('', index=x.index, columns=x.columns)
-        styles.iloc[0, :] = 'font-weight: bold;'  # 첫 줄(총계) 전체 굵게
-        styles['손익'] = 'font-weight: bold;'     # 손익 열 굵게
+        # '손익' 라벨 열만 진하게
+        styles['손익'] = 'font-weight: bold;'     
+        # [핵심] 숫자는 굵기 통일! 오직 (0번째 줄, '합계' 열)의 최종 수익금만 금색으로 크고 굵게 포인트!
+        styles.loc[0, '합계 (환산)'] = f'color: {gold_highlight}; font-weight: 900;'
         return styles
 
-    # 🌟 폰트 크기를 시원하게 15px로 키워 볼드체와 일반체의 폰트 왜곡을 방지했습니다.
     st.dataframe(
         df_summary.style
         .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '15px', 'text-align': 'center'})
@@ -205,7 +208,6 @@ else:
 
     with tab_chart1:
         pc1, pc2 = st.columns(2)
-        
         text_font_setting = dict(color='black', size=20, family="sans-serif")
         
         with pc1:
@@ -255,7 +257,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭 (가독성 향상을 위해 폰트 14px로 소폭 확대)
+    # 🌟 상세 데이터 탭 
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2 = st.tabs(["📊 보유 자산 상세", "🧾 실현 손익 영수증"])
