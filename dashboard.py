@@ -6,12 +6,12 @@ import plotly.express as px
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 
-# --- 1. 기본 설정 ---
-st.set_page_config(page_title="나만의 포트폴리오", layout="wide", page_icon="🌙")
+# --- 1. 기본 설정 (아이콘 및 제목 변경) ---
+st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
 col1, col2 = st.columns([8, 2])
 with col1:
-    st.markdown("<h2 style='margin-top: -15px;'>🌙 내 손안의 포트폴리오</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 with col2:
     is_dark_mode = st.toggle("다크 모드 켜기", value=True)
 
@@ -37,6 +37,9 @@ st.markdown(f"""
         color: {text_color} !important;
     }}
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
+    /* 탭 디자인을 더 콤팩트하게 */
+    .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
+    .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -81,6 +84,7 @@ def get_market_data(ticker):
 if df.empty:
     st.info("아직 거래 내역이 없습니다.")
 else:
+    # 데이터 전처리
     df['계산용수량'] = df.apply(lambda x: x['수량'] if x['거래종류'] == '매수' else -x['수량'], axis=1)
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
     holdings = holdings[holdings['계산용수량'] > 0].copy()
@@ -94,10 +98,8 @@ else:
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
     usd_krw_price, _ = get_market_data("KRW=X")
-    st.caption(f"💱 실시간 환율: 1 USD = {usd_krw_price:,.2f} KRW")
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
-
     for index, row in holdings.iterrows():
         current_price, _ = get_market_data(row['티커'])
         realtime_prices.append(current_price)
@@ -120,12 +122,14 @@ else:
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
+    # 🌟 최상단 KPI 지표
     st.metric(label="💰 총 자산 (원)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
-    st.markdown("---")
 
-    # =========================================================
-    # 🌟 실현 손익 및 배당금 요약 (모바일 최적화 표 레이아웃)
-    # =========================================================
+    # 🌟 실현 손익 데이터 처리
+    t_sell_krw, t_sell_usd_val, t_sell_usd_krw = 0, 0.0, 0
+    t_div_krw, t_div_usd_val, t_div_usd_krw = 0, 0.0, 0
+    total_realized_krw = 0
+
     if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
         if '분류' not in df_pnl.columns: df_pnl['분류'] = ''
         if '통화' not in df_pnl.columns: df_pnl['통화'] = ''
@@ -133,27 +137,19 @@ else:
         
         df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
         df_pnl['실현손익(달러)'] = pd.to_numeric(df_pnl['실현손익(달러)'], errors='coerce').fillna(0)
-
         df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x['분류']).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
         
         currency_map = df.drop_duplicates('티커').set_index('티커')['통화'].to_dict()
         df_pnl['통화'] = df_pnl.apply(lambda x: x['통화'] if str(x['통화']).strip() != '' else currency_map.get(x['티커'], 'KRW'), axis=1)
         
         def calculate_today_krw(row):
-            krw = row['실현손익(원)']
-            usd = row['실현손익(달러)']
-            curr = row['통화']
-            
+            krw, usd, curr = row['실현손익(원)'], row['실현손익(달러)'], row['통화']
             if curr == 'USD':
-                if usd == 0 and krw != 0:
-                    usd = krw / 1350.0  
-                today_krw = usd * usd_krw_price
-                return usd, today_krw
-            else:
-                return 0.0, krw
+                if usd == 0 and krw != 0: usd = krw / 1350.0  
+                return usd, usd * usd_krw_price
+            return 0.0, krw
 
         df_pnl[['실현손익(외화)', '현재환율적용_실현손익(원)']] = df_pnl.apply(lambda row: pd.Series(calculate_today_krw(row)), axis=1)
-        
         df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'국내' if x['통화']=='KRW' else '해외'})", axis=1)
         df_pnl['실현손익_차트용(만원)'] = (df_pnl['현재환율적용_실현손익(원)'] / 10000).astype(int)
         
@@ -162,7 +158,6 @@ else:
         df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
         df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
 
-        # 통화별 집계
         t_sell_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'KRW')]['현재환율적용_실현손익(원)'].sum()
         t_sell_usd_val = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'USD')]['실현손익(외화)'].sum()
         t_sell_usd_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'USD')]['현재환율적용_실현손익(원)'].sum()
@@ -173,60 +168,114 @@ else:
         
         total_realized_krw = t_sell_krw + t_sell_usd_krw + t_div_krw + t_div_usd_krw
 
-        # 🌟 모바일 최적화: 깔끔한 표 형태로 요약 정보 제공
-        st.markdown("**💸 실현 손익 및 배당금 요약** <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
+    # 🌟 콤팩트 실현손익 요약 표
+    summary_data = {
+        "구분": ["📉 매도", "🎁 배당", "💡 합계"],
+        "국내 (원)": [f"{int(t_sell_krw):,.0f}", f"{int(t_div_krw):,.0f}", f"{int(t_sell_krw + t_div_krw):,.0f}"],
+        "해외 (달러)": [f"${t_sell_usd_val:,.2f}", f"${t_div_usd_val:,.2f}", f"${t_sell_usd_val + t_div_usd_val:,.2f}"],
+        "총계 (환산)": [f"{int(t_sell_krw + t_sell_usd_krw):,.0f}", f"{int(t_div_krw + t_div_usd_krw):,.0f}", f"{int(total_realized_krw):,.0f}"]
+    }
+    st.dataframe(
+        pd.DataFrame(summary_data).style.set_properties(**{
+            'background-color': df_bg, 'color': df_text, 'font-size': '13px', 'text-align': 'center'
+        }),
+        use_container_width=True, hide_index=True
+    )
+
+    st.markdown("---")
+
+    # =========================================================
+    # 🌟 [혁신 1] 차트 분석 탭 (스크롤 제로화)
+    # =========================================================
+    st.markdown("**📊 포트폴리오 시각화**")
+    tab_chart1, tab_chart2, tab_chart3 = st.tabs(["📈 자산 추이", "🥧 자산 비중", "📊 실현 손익"])
+
+    with tab_chart1:
+        if not df_history.empty:
+            df_history['총자산(만원)'] = (df_history[df_history.columns[1]] / 10000).astype(int)
+            fig_line = px.line(df_history, x='날짜', y='총자산(만원)', markers=True)
+            fig_line.update_traces(line_color=line_color, marker_color=line_color)
+            fig_line.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig_line, use_container_width=True)
+        else:
+            st.caption("아직 '일별기록' 시트에 데이터가 없습니다.")
+
+    with tab_chart2:
+        # 모바일에서는 세로로, PC에서는 가로로 자동 정렬
+        pc1, pc2 = st.columns(2)
         
-        summary_data = {
-            "구분": ["📉 매도 수익", "🎁 배당금", "💡 합계"],
-            "국내 (원)": [f"{int(t_sell_krw):,.0f}", f"{int(t_div_krw):,.0f}", f"{int(t_sell_krw + t_div_krw):,.0f}"],
-            "해외 (달러)": [f"${t_sell_usd_val:,.2f}", f"${t_div_usd_val:,.2f}", f"${t_sell_usd_val + t_div_usd_val:,.2f}"],
-            "총계 (원화 환산)": [f"{int(t_sell_krw + t_sell_usd_krw):,.0f}", f"{int(t_div_krw + t_div_usd_krw):,.0f}", f"{int(total_realized_krw):,.0f}"]
-        }
+        # 🌟 혁신 2: 텍스트 폰트 색상을 진한 먹색(#1A1A1A)으로 강제 고정하여 시인성 극대화
+        text_font_setting = dict(color='#1A1A1A', size=13, family="sans-serif")
         
+        with pc1:
+            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 자산군별 비중 ]</div>", unsafe_allow_html=True)
+            fig1 = px.pie(holdings.groupby('자산군')['평가액(만원)'].sum().reset_index(), values='평가액(만원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
+            fig1.update_traces(textposition='inside', textinfo='percent+label', textfont=text_font_setting)
+            fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with pc2:
+            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 개별 종목별 비중 ]</div>", unsafe_allow_html=True)
+            fig2 = px.pie(holdings, values='평가액(만원)', names='종목명', hole=0.4, color_discrete_sequence=pastel_colors)
+            fig2.update_traces(textposition='inside', textinfo='percent+label', textfont=text_font_setting)
+            fig2.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    with tab_chart3:
+        if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
+            period = st.radio("보기 옵션", ["월별", "연별", "일별"], horizontal=True, label_visibility="collapsed")
+            
+            def plot_pnl_bar(data, x_col):
+                color_map = {'매도 (국내)': '#FF6B6B', '매도 (해외)': '#FFA07A', '배당 (국내)': '#4DABF7', '배당 (해외)': '#51CF66'}
+                fig = px.bar(data, x=x_col, y='실현손익_차트용(만원)', color='차트분류', text='실현손익_차트용(만원)', color_discrete_map=color_map)
+                fig.update_traces(texttemplate='%{text:,.0f}', textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
+                fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
+                st.plotly_chart(fig, use_container_width=True)
+
+            if period == "월별":
+                plot_pnl_bar(df_pnl.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '월')
+            elif period == "연별":
+                plot_pnl_bar(df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '연')
+            else:
+                plot_pnl_bar(df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '일자')
+        else:
+            st.caption("아직 매도/배당 기록이 없습니다.")
+
+    st.markdown("---")
+
+    # =========================================================
+    # 🌟 [혁신 3] 상세 데이터 탭 (깔끔한 표 정리)
+    # =========================================================
+    st.markdown("**📋 상세 데이터**")
+    tab_data1, tab_data2 = st.tabs(["📊 보유 자산 상세", "🧾 실현 손익 영수증"])
+
+    with tab_data1:
+        display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
+        display_df.rename(columns={'계산용수량': '수량', '수익률(%)': '수익률', '평가액(원)': '평가액', '손익(원)': '손익'}, inplace=True)
+
+        def style_table(val):
+            if isinstance(val, (int, float)):
+                color = profit_up_color if val > 0 else profit_down_color if val < 0 else text_color
+                return f'color: {color}; font-weight: bold;'
+            return ''
+
         st.dataframe(
-            pd.DataFrame(summary_data).style.set_properties(**{
-                'background-color': df_bg, 
-                'color': df_text, 
-                'font-size': '12px',
-                'text-align': 'center'
-            }),
+            display_df.style
+            .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'})
+            .format({'수량': '{:,.1f}', '수익률': '{:,.2f}%', '평가액': '{:,.0f}', '손익': '{:,.0f}'})
+            .map(style_table, subset=['수익률', '손익']),
             use_container_width=True, hide_index=True
         )
-        
-        st.caption("※ 아래 차트는 비중 파악을 위해 **원화 환산(만 원)** 기준으로 통합되어 표시됩니다.")
-        tab1, tab2, tab3 = st.tabs(["일별 (만원)", "월별 (만원)", "연별 (만원)"])
 
-        def plot_pnl_bar(data, x_col):
-            color_map = {
-                '매도 (국내)': '#FF6B6B', 
-                '매도 (해외)': '#FFA07A', 
-                '배당 (국내)': '#4DABF7', 
-                '배당 (해외)': '#51CF66'  
-            }
-            fig = px.bar(data, x=x_col, y='실현손익_차트용(만원)', color='차트분류', text='실현손익_차트용(만원)', color_discrete_map=color_map)
-            fig.update_traces(texttemplate='%{text:,.0f}', textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
-            fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
-            st.plotly_chart(fig, use_container_width=True)
-
-        with tab1:
-            daily_pnl = df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index()
-            plot_pnl_bar(daily_pnl, '일자')
-        with tab2:
-            monthly_pnl = df_pnl.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index()
-            plot_pnl_bar(monthly_pnl, '월')
-        with tab3:
-            yearly_pnl = df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index()
-            plot_pnl_bar(yearly_pnl, '연')
-
-        # 🌟 상세 영수증
-        with st.expander("📝 실현 손익 및 배당금 상세 내역 (영수증)"):
+    with tab_data2:
+        if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
             display_pnl = df_pnl[['날짜', '차트분류', '종목명', '통화', '실현손익(외화)', '현재환율적용_실현손익(원)']].copy()
-            display_pnl['날짜'] = display_pnl['날짜'].dt.strftime('%Y-%m-%d')
+            display_pnl['날짜'] = display_pnl['날짜'].dt.strftime('%m-%d')
             display_pnl.sort_values('날짜', ascending=False, inplace=True)
             
             display_pnl['달러수익'] = display_pnl.apply(lambda x: f"${x['실현손익(외화)']:,.2f}" if x['통화'] == 'USD' else "-", axis=1)
-            display_pnl.rename(columns={'현재환율적용_실현손익(원)': '실현손익(오늘환율 적용)'}, inplace=True)
-            display_pnl = display_pnl[['날짜', '차트분류', '종목명', '달러수익', '실현손익(오늘환율 적용)']]
+            display_pnl.rename(columns={'현재환율적용_실현손익(원)': '환산수익(원)'}, inplace=True)
+            display_pnl = display_pnl[['날짜', '차트분류', '종목명', '달러수익', '환산수익(원)']]
             
             def style_pnl(val):
                 if isinstance(val, (int, float)):
@@ -237,66 +286,9 @@ else:
             st.dataframe(
                 display_pnl.style
                 .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'})
-                .format({'실현손익(오늘환율 적용)': '{:,.0f} 원'})
-                .map(style_pnl, subset=['실현손익(오늘환율 적용)']),
+                .format({'환산수익(원)': '{:,.0f}'})
+                .map(style_pnl, subset=['환산수익(원)']),
                 use_container_width=True, hide_index=True
             )
-
-    else:
-        st.caption("아직 매도/배당 기록이 없습니다.")
-
-    st.markdown("---")
-
-    # =========================================================
-    # 🌟 자산 비중 파이 차트 (자산군 & 개별종목 부활!)
-    # =========================================================
-    st.markdown("**🥧 자산 비중 (만 원)**")
-    
-    # 두 차트를 나란히 배치 (모바일에서는 자동으로 위아래로 쌓임)
-    pc1, pc2 = st.columns(2)
-    
-    with pc1:
-        st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 자산군별 비중 ]</div>", unsafe_allow_html=True)
-        fig1 = px.pie(holdings.groupby('자산군')['평가액(만원)'].sum().reset_index(), values='평가액(만원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
-        fig1.update_traces(textposition='inside', textinfo='percent+label', textfont_size=13)
-        fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig1, use_container_width=True)
-        
-    with pc2:
-        st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 개별 종목별 비중 ]</div>", unsafe_allow_html=True)
-        fig2 = px.pie(holdings, values='평가액(만원)', names='종목명', hole=0.4, color_discrete_sequence=pastel_colors)
-        fig2.update_traces(textposition='inside', textinfo='percent+label', textfont_size=13)
-        fig2.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-
-    st.markdown("**📋 보유 자산 상세 (원)**")
-    display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
-    display_df.rename(columns={'계산용수량': '수량', '수익률(%)': '수익률', '평가액(원)': '평가액', '손익(원)': '손익'}, inplace=True)
-
-    def style_table(val):
-        if isinstance(val, (int, float)):
-            color = profit_up_color if val > 0 else profit_down_color if val < 0 else text_color
-            return f'color: {color}; font-weight: bold;'
-        return ''
-
-    st.dataframe(
-        display_df.style
-        .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'})
-        .format({'수량': '{:,.1f}', '수익률': '{:,.2f}%', '평가액': '{:,.0f}', '손익': '{:,.0f}'})
-        .map(style_table, subset=['수익률', '손익']),
-        use_container_width=True, hide_index=True
-    )
-
-    st.markdown("---")
-
-    st.markdown("**📈 자산 총액 변동 추이 (만 원)**")
-    if not df_history.empty:
-        df_history['총자산(만원)'] = (df_history[df_history.columns[1]] / 10000).astype(int)
-        fig3 = px.line(df_history, x='날짜', y='총자산(만원)', markers=True)
-        fig3.update_traces(line_color=line_color, marker_color=line_color)
-        fig3.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.caption("아직 '일별기록' 시트에 데이터가 없습니다.")
+        else:
+            st.caption("표시할 실현 손익 데이터가 없습니다.")
