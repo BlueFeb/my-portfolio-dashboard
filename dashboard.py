@@ -10,10 +10,9 @@ import json
 st.set_page_config(page_title="나만의 포트폴리오", layout="wide", page_icon="🌙")
 
 # --- 2. 🌟 모드 전환 스위치 및 테마 디자인 설정 ---
-# 제목과 스위치를 같은 줄에 배치하기 위해 화면을 8:2 비율로 나눕니다.
 col1, col2 = st.columns([8, 2])
 with col1:
-    st.markdown("<h2 style='margin-top: -15px;'>🌟 내 포트폴리오</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='margin-top: -15px;'>🌙 내 손안의 포트폴리오</h2>", unsafe_allow_html=True)
 with col2:
     is_dark_mode = st.toggle("다크 모드 켜기", value=True)
 
@@ -22,20 +21,17 @@ if is_dark_mode:
     bg_color, text_color = "#1E1E1E", "#F0F2F6"
     df_bg, df_text = "#2A2A2A", "#FFFFFF"
     chart_template = "plotly_dark"
-    # 다크모드용 밝은 파스텔톤
     pastel_colors = ['#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF', '#E8BAFF']
     line_color = '#FF99CC'
-    profit_up_color, profit_down_color = '#FF9999', '#99CCFF' # 상승 빨강(파스텔), 하락 파랑(파스텔)
+    profit_up_color, profit_down_color = '#FF9999', '#99CCFF' 
 else:
     bg_color, text_color = "#F8F9FA", "#212529"
     df_bg, df_text = "#FFFFFF", "#212529"
     chart_template = "plotly_white"
-    # 라이트모드용 약간 진한 파스텔톤 (가독성을 위해)
     pastel_colors = ['#FF8A98', '#FFB677', '#E5E570', '#85E39C', '#8AC4FF', '#C785FF']
     line_color = '#FF6699'
-    profit_up_color, profit_down_color = '#E63946', '#457B9D' # 상승 짙은 빨강, 하락 짙은 파랑
+    profit_up_color, profit_down_color = '#E63946', '#457B9D'
 
-# 앱 전체 배경 및 텍스트 색상을 강제로 바꾸는 마법의 CSS 주사
 st.markdown(f"""
     <style>
     .stApp {{ background-color: {bg_color}; }}
@@ -47,7 +43,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# --- 3. 구글 시트 데이터 로드 (Secrets 사용) ---
+# --- 3. 구글 시트 데이터 로드 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -135,11 +131,11 @@ else:
     st.metric(
         label="💰 총 자산 (원화 환산)", 
         value=f"{total_asset:,.0f} 원", 
-        delta=f"평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)"
+        delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)"
     )
     st.markdown("---")
 
-    # 🌟 차트 출력 (토글 상태에 따라 색상 자동 변경)
+    # 차트 출력
     st.markdown("**🥧 자산군 및 종목 비중**")
     
     fig1 = px.pie(holdings.groupby('자산군')['평가금액(원)'].sum().reset_index(), values='평가금액(원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
@@ -154,24 +150,31 @@ else:
 
     st.markdown("---")
 
-    # 🌟 테이블 출력 (토글 상태에 따라 글씨 및 배경 변경)
-    st.markdown("**📋 보유 자산 상세**")
-    display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가금액(원)']].copy()
-    display_df.rename(columns={'계산용수량': '수량'}, inplace=True)
+    # 🌟 테이블 출력 (열 이름 압축 & 폰트 축소 & 정렬 기능 강조)
+    st.markdown("**📋 보유 자산 상세 (열 제목을 터치하면 정렬됩니다 ↕️)**")
+    
+    # 가로 스크롤 방지를 위해 열 이름을 아주 짧게 변경하고 '평가손익(원)'을 추가
+    display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가금액(원)', '평가손익(원)']].copy()
+    display_df.rename(columns={
+        '계산용수량': '수량', 
+        '수익률(%)': '수익률', 
+        '평가금액(원)': '평가액', 
+        '평가손익(원)': '손익'
+    }, inplace=True)
 
-    # 수익률에 따른 색상 함수 (모드별 색상 적용)
     def style_table(val):
-        if isinstance(val, float):
+        if isinstance(val, (int, float)):
             color = profit_up_color if val > 0 else profit_down_color if val < 0 else text_color
             return f'color: {color}; font-weight: bold;'
         return ''
 
     st.dataframe(
         display_df.style
-        .set_properties(**{'background-color': df_bg, 'color': df_text})
-        .format({'수량': '{:,.1f}', '수익률(%)': '{:,.2f}%', '평가금액(원)': '{:,.0f}'})
-        .map(style_table, subset=['수익률(%)']),
-        use_container_width=True, hide_index=True
+        .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '12px'}) # 폰트 크기 12px로 축소
+        .format({'수량': '{:,.1f}', '수익률': '{:,.2f}%', '평가액': '{:,.0f}', '손익': '{:,.0f}'})
+        .map(style_table, subset=['수익률', '손익']),
+        use_container_width=True, 
+        hide_index=True
     )
 
     st.markdown("---")
