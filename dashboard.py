@@ -14,8 +14,11 @@ st.markdown("<h2 style='text-align: center;'>🌙 내 손안의 포트폴리오<
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
-        # 🌟 수정된 부분: from_json_key -> from_json_keyfile_dict
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(dict(st.secrets), scope)
+        import json # 🌟 포장을 뜯기 위한 도구 추가
+        
+        # 🌟 금고에서 텍스트를 꺼내서, 다시 파이썬 딕셔너리로 변환!
+        creds_dict = json.loads(st.secrets["google_credentials"])
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         
         SHEET_NAME = "MyPortfolio_DB" 
