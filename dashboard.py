@@ -51,7 +51,7 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 🌟 [신규] 글로벌 매크로 전광판 데이터 로드 (에러 및 VKOSPI 철통 방어) ---
+# --- 2. 글로벌 매크로 전광판 데이터 로드 (에러 및 VKOSPI 철통 방어) ---
 @st.cache_data(ttl=300) 
 def get_macro_indicators():
     tickers = {
@@ -67,7 +67,6 @@ def get_macro_indicators():
     for name, ticker in tickers.items():
         try:
             stock = yf.Ticker(ticker)
-            # 🚨 1mo(한달) 치를 가져와서 중간에 빵꾸난 공휴일 데이터 에러 방어
             hist = stock.history(period="1mo").dropna(subset=['Close'])
             if len(hist) >= 2:
                 curr = float(hist['Close'].iloc[-1])
@@ -76,16 +75,18 @@ def get_macro_indicators():
             else: results[name] = None
         except: results[name] = None
         
-    # 🚨 [특수 방어] 야후가 한국 VKOSPI를 누락했을 경우 네이버 증권 스크래핑 강제 실행
+    # 🚨 한국 VKOSPI 누락 시 네이버 증권 스크래핑 강제 실행
     if results.get("🥶 한국 VKOSPI") is None:
         try:
             res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-            curr = float(re.search(r'<em id="now_value">([0-9.]+)</em>', res.text).group(1))
-            change_val = float(re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text).group(1))
-            if "nv01" in res.text.split('<span id="change_value_and_rate">')[1].split('</span>')[0]: 
-                change_val = -change_val # 파란색(하락) 클래스 감지 시 마이너스 처리
-            prev = curr - change_val
-            results["🥶 한국 VKOSPI"] = {"current": curr, "change_pct": (change_val / prev) * 100, "change_val": change_val}
+            curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
+            if curr_match:
+                curr = float(curr_match.group(1))
+                chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
+                change_val = float(chg_match.group(1)) if chg_match else 0.0
+                if "nv01" in res.text: change_val = -change_val # 하락(파란색) 감지
+                prev = curr - change_val
+                results["🥶 한국 VKOSPI"] = {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
         except: pass
 
     return results
@@ -137,14 +138,13 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 [모바일 최적화] HTML/CSS 기반 콤팩트 전광판 렌더링
+# 🌟 [에러 수정 완료] HTML 렌더링 텍스트 파괴 방어
 # =========================================================
 macro_data = get_macro_indicators()
 st.markdown("**🌐 글로벌 매크로 전광판**")
 
-# Flexbox를 사용하여 화면 크기에 맞춰 카드가 3열~4열로 자동 정렬되도록 CSS 작성
-html_cards = f"""<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;">"""
-
+# 🚨 들여쓰기를 완벽히 제거하여 마크다운이 코드로 착각하지 않도록 한 줄씩 이어 붙임
+html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;">'
 display_order = ["🇰🇷 코스피", "🇺🇸 나스닥 선물", "💾 반도체 (SOX)", "💱 원/달러", "💎 이더리움", "🥶 미국 VIX", "🥶 한국 VKOSPI"]
 
 for name in display_order:
@@ -154,28 +154,24 @@ for name in display_order:
     
     if data is not None:
         curr, d_val, d_pct = data["current"], data["change_val"], data["change_pct"]
-        # VIX 지수나 다른 지수 모두 상승(+)하면 붉은색, 하락(-)하면 푸른색 적용
         if d_val > 0: color = profit_up_color
         elif d_val < 0: color = profit_down_color
         else: color = text_color
         
-        html_cards += f"""
-        <div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
-            <div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>
-            <div style="font-size: 15px; font-weight: bold; color: {text_color}; margin-bottom: 2px;">{prefix}{curr:,.2f}{suffix}</div>
-            <div style="font-size: 11px; font-weight: bold; color: {color};">{d_val:+,.2f} ({d_pct:+.2f}%)</div>
-        </div>
-        """
+        html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">'
+        html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
+        html_cards += f'<div style="font-size: 15px; font-weight: bold; color: {text_color}; margin-bottom: 2px;">{prefix}{curr:,.2f}{suffix}</div>'
+        html_cards += f'<div style="font-size: 11px; font-weight: bold; color: {color};">{d_val:+,.2f} ({d_pct:+.2f}%)</div>'
+        html_cards += '</div>'
     else:
-        # 데이터 지연 시 회색으로 처리
-        html_cards += f"""
-        <div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; opacity: 0.6;">
-            <div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>
-            <div style="font-size: 13px; font-weight: bold; color: gray; margin-bottom: 2px;">데이터 지연</div>
-            <div style="font-size: 11px; color: gray;">-</div>
-        </div>
-        """
-html_cards += "</div>"
+        html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; opacity: 0.6;">'
+        html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
+        html_cards += f'<div style="font-size: 13px; font-weight: bold; color: gray; margin-bottom: 2px;">데이터 지연</div>'
+        html_cards += '<div style="font-size: 11px; color: gray;">-</div>'
+        html_cards += '</div>'
+
+html_cards += '</div>'
+
 st.markdown(html_cards, unsafe_allow_html=True)
 st.markdown("---")
 
@@ -209,7 +205,6 @@ else:
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    # 🚨 1450원 환율 0원 파괴 방어
     usd_krw_price = macro_data.get("💱 원/달러", {}).get("current", 0.0) if macro_data.get("💱 원/달러") else 0.0
     if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
@@ -365,7 +360,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭
+    # 🌟 상세 데이터 탭 
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
