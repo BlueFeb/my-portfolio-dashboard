@@ -15,11 +15,8 @@ import os
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
-col1, col2 = st.columns([8, 2])
-with col1:
-    st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
-with col2:
-    is_dark_mode = st.toggle("다크 모드 켜기", value=True)
+# 🌟 모바일 한 줄(One-line) 강제 정렬을 위한 CSS 및 테마 설정
+is_dark_mode = st.sidebar.toggle("다크 모드 켜기", value=True)
 
 if is_dark_mode:
     bg_color, text_color = "#1E1E1E", "#F0F2F6"
@@ -49,12 +46,28 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
-    [data-testid="stExpander"] {{ margin-top: -5px; }}
+    
+    /* 🌟 모바일에서 한 줄로 강제 정렬하는 CSS 마법 */
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] {{
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+    }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{
+        width: 75% !important;
+        flex: 1 1 75% !important;
+        min-width: 75% !important;
+    }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
+        width: 25% !important;
+        flex: 1 1 25% !important;
+        min-width: 25% !important;
+    }}
+    [data-testid="stExpander"] {{ margin-top: -10px; }}
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 2. 다이내믹 매크로 지표 관리 및 영구 저장 시스템 ---
+# --- 2. 다이내믹 매크로 지표 관리 시스템 ---
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "^KS11", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "^KQ11", "prefix": "", "suffix": "", "inverse": False},
@@ -96,22 +109,18 @@ def save_macro_settings(selected):
 def get_macro_indicators(selected_names_tuple):
     results = {}
     if not selected_names_tuple: return results
-    
     for name in selected_names_tuple:
         info = INDICATORS_CONFIG.get(name)
         if not info: continue
-        
         try:
             stock = yf.Ticker(info["ticker"])
             hist = stock.history(period="1mo").dropna(subset=['Close'])
             if len(hist) >= 2:
                 curr = float(hist['Close'].iloc[-1])
                 prev = float(hist['Close'].iloc[-2])
-                
                 if info["ticker"] == "JPYKRW=X":
                     curr *= 100
                     prev *= 100
-                
                 change_val = curr - prev
                 change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
                 results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
@@ -133,7 +142,6 @@ def load_data():
         df_history = pd.DataFrame(client.open(SHEET_NAME).worksheet("일별기록").get_all_records())
         try: df_pnl = pd.DataFrame(client.open(SHEET_NAME).worksheet("실현손익").get_all_records())
         except: df_pnl = pd.DataFrame()
-            
         return df_tx, df_history, df_pnl
     except Exception as e:
         st.error(f"⚠️ 구글 시트 연결 오류: {e}")
@@ -166,32 +174,49 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 [버그 수정 완료] 다이내믹 커스텀 전광판 렌더링 (콜백 엔진 적용)
+# 🌟 [디자인 혁신] 모바일 원라인(One-line) 메인 헤더 및 전광판
 # =========================================================
-# 🚨 1. 상태 동기화 버그 방지: 세션 초기화
+st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
+c1, c2 = st.columns([7, 3])
+with c1:
+    st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
+with c2:
+    st.caption("") # 줄 맞춤용 빈 공간
+
 if "macro_selector" not in st.session_state:
     st.session_state.macro_selector = load_macro_settings()
 
-# 🚨 2. 콜백 함수: 클릭 즉시 화면을 그리기 전에 무조건 파일부터 강제 저장
 def on_macro_change():
     save_macro_settings(st.session_state.macro_selector)
 
+st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
 
 with col_title:
-    st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 8px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
+    st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 5px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
 
 with col_setting:
-    with st.expander("⚙️ 지표 설정"):
-        # 🚨 3. multiselect에 콜백(on_change) 연결하여 1-Tick Lag 완벽 제거
-        selected_indicators = st.multiselect(
-            "최대 9개 선택",
-            options=list(INDICATORS_CONFIG.keys()),
-            key="macro_selector",
-            max_selections=9,
-            on_change=on_macro_change,
-            label_visibility="collapsed"
-        )
+    # 🚨 모바일 공간 최적화: Popover(팝오버 버튼) 적용. 지원 안 할 시 Expander로 우회
+    try:
+        with st.popover("⚙️ 설정", use_container_width=True):
+            selected_indicators = st.multiselect(
+                "최대 9개 선택",
+                options=list(INDICATORS_CONFIG.keys()),
+                key="macro_selector",
+                max_selections=9,
+                on_change=on_macro_change,
+                label_visibility="collapsed"
+            )
+    except AttributeError:
+        with st.expander("⚙️ 설정"):
+            selected_indicators = st.multiselect(
+                "최대 9개 선택",
+                options=list(INDICATORS_CONFIG.keys()),
+                key="macro_selector",
+                max_selections=9,
+                on_change=on_macro_change,
+                label_visibility="collapsed"
+            )
 
 macro_data = {} 
 
@@ -239,7 +264,7 @@ st.markdown("---")
 
 
 # =========================================================
-# 🌟 포트폴리오 계산 로직
+# 🌟 포트폴리오 계산 로직 (에러 완벽 차단)
 # =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
