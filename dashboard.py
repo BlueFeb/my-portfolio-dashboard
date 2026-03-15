@@ -82,29 +82,16 @@ def get_market_data(ticker):
         return 0.0, 0.0
     except: return 0.0, 0.0
 
-# 🌟 [신규] 종목별 예상 주당 배당금 추출 (에러 철통 방어)
-@st.cache_data(ttl=86400) # 속도 저하 방지를 위해 24시간 캐싱
-def get_expected_dividend(ticker, target_month):
+# 🌟 [신규] 종목별 과거 배당 이력 캐싱 (6개월 예측용, 속도 최적화)
+@st.cache_data(ttl=86400) # 24시간 유지
+def get_dividend_history(ticker):
     try:
-        if not ticker: return 0.0
-        t = yf.Ticker(ticker)
-        # 과거 2년치 주가 이력에서 배당 기록만 추출
-        hist = t.history(period="2y")
-        if 'Dividends' not in hist.columns: return 0.0
-        divs = hist[hist['Dividends'] > 0]['Dividends']
-        if divs.empty: return 0.0
-        
-        # 월배당 주식 판별 (2년 동안 18번 이상 줬으면 월배당으로 간주)
-        if len(divs) >= 18: 
-            return float(divs.iloc[-1]) # 가장 최근 배당금 반환
-            
-        # 분기/연배당 주식: 타겟 달(next_month)에 배당을 준 이력이 있는지 확인
-        target_divs = divs[divs.index.month == target_month]
-        if not target_divs.empty:
-            return float(target_divs.iloc[-1]) # 가장 최근 해당 월의 배당금 반환
-        return 0.0
-    except:
-        return 0.0
+        if not ticker: return pd.Series(dtype=float)
+        hist = yf.Ticker(ticker).history(period="2y")
+        if 'Dividends' in hist.columns:
+            return hist[hist['Dividends'] > 0]['Dividends']
+    except: pass
+    return pd.Series(dtype=float)
 
 if df.empty:
     st.info("아직 거래 내역이 없습니다.")
@@ -249,9 +236,8 @@ else:
             st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 🌟 심층 썬버스트 차트 ]</div>", unsafe_allow_html=True)
             holdings_positive = holdings[holdings['평가액(만원)'] > 0].copy()
             if not holdings_positive.empty:
-                # 🌟 [썬버스트 중심원 조절] 가상의 부모를 두어 중심부 비중을 시각적으로 안정화
-                holdings_positive['내 포트폴리오'] = '총 자산' 
-                fig_sun = px.sunburst(holdings_positive, path=['내 포트폴리오', '자산군', '종목명'], values='평가액(만원)', color_discrete_sequence=pastel_colors)
+                # 🌟 [요청 반영] 거추장스러운 총자산 루트 삭제! [자산군 -> 종목명]의 2단계로만 심플하게 표시
+                fig_sun = px.sunburst(holdings_positive, path=['자산군', '종목명'], values='평가액(만원)', color_discrete_sequence=pastel_colors)
                 fig_sun.update_traces(textinfo='label+percent entry', textfont=dict(color='black', size=15))
                 fig_sun.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
                 st.plotly_chart(fig_sun, use_container_width=True)
@@ -288,10 +274,10 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭 (보유종목 기반 실제 예상 배당금 도입!)
+    # 🌟 상세 데이터 탭 (기능 3: 향후 6개월 배당 예측 시스템 완벽 구현)
     # =========================================================
     st.markdown("**📋 상세 데이터**")
-    tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🎁 배당 분석"])
+    tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
 
     with tab_data1:
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
@@ -338,63 +324,84 @@ else:
             st.caption("표시할 데이터가 없습니다.")
             
     with tab_data3:
-        # 🌟 다음 달 타겟 월 계산
+        # 🌟 향후 6개월 달력 배열 생성 (현재 2026년 3월 기준 -> 4월~9월)
         kst = pytz.timezone('Asia/Seoul')
-        next_month_dt = datetime.datetime.now(kst) + pd.DateOffset(months=1)
-        next_month = next_month_dt.month
+        now = datetime.datetime.now(kst)
+        next_6_months = []
+        for i in range(1, 7):
+            m = now.month + i
+            y = now.year + (m - 1) // 12
+            m = (m - 1) % 12 + 1
+            next_6_months.append((y, m))
+            
+        expected_records = []
+        total_6_months_krw = 0.0
         
-        # 보유 종목 기반 실제 예상 배당금 계산 로직
-        next_div_records = []
-        total_next_div_krw = 0.0
-        
-        with st.spinner(f"로딩 중... 보유 종목의 {next_month}월 배당 이력을 스캔합니다."):
+        with st.spinner("과거 2년치 배당 이력을 스캔하여 향후 6개월의 현금흐름을 예측 중입니다... (최초 로딩 시 시간이 소요됩니다)"):
             for _, row in holdings.iterrows():
                 ticker = row['티커']
                 name = row['종목명']
                 qty = row['계산용수량']
-                currency = row['통화']
+                curr = row['통화']
                 
-                # 과거 2년 패턴 기반 주당 예상 배당금 추출
-                dps = get_expected_dividend(ticker, next_month)
+                divs = get_dividend_history(ticker)
+                if divs.empty: continue
                 
-                if dps > 0:
-                    expected_div = dps * qty
-                    rate = usd_krw_price if currency == 'USD' else 1.0
-                    expected_div_krw = expected_div * rate
-                    total_next_div_krw += expected_div_krw
-                    
-                    next_div_records.append({
-                        '종목명': name,
-                        '수량': qty,
-                        '통화': currency,
-                        '예상 주당배당금': dps,
-                        '예상 배당금': expected_div,
-                        '환산 예상금액(원)': expected_div_krw
-                    })
+                # 월배당 여부 확인 (2년 중 18번 이상 주면 월배당으로 간주)
+                is_monthly = len(divs) >= 18
+                
+                for y, m in next_6_months:
+                    dps = 0.0
+                    if is_monthly:
+                        dps = float(divs.iloc[-1]) # 월배당은 가장 최근 금액 반영
+                    else:
+                        # 해당 특정 달(m)에 배당을 준 적이 있는지 과거 내역 스캔
+                        month_divs = divs[divs.index.month == m]
+                        if not month_divs.empty:
+                            dps = float(month_divs.iloc[-1])
+                            
+                    if dps > 0:
+                        expected_div = dps * qty
+                        rate = usd_krw_price if curr == 'USD' else 1.0
+                        expected_krw = expected_div * rate
+                        total_6_months_krw += expected_krw
+                        
+                        expected_records.append({
+                            '연월': f"{y}년 {m:02d}월",
+                            '월': m,
+                            '종목명': name,
+                            '통화': curr,
+                            '예상 주당배당금': dps,
+                            '예상 배당금': expected_div,
+                            '환산 예상금액(원)': expected_krw
+                        })
         
-        st.markdown(f"**📈 {next_month}월 예상 총 배당금:** 약 {int(total_next_div_krw):,.0f} 원 <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
-        
-        if next_div_records:
-            next_div_df = pd.DataFrame(next_div_records)
+        if expected_records:
+            next_div_df = pd.DataFrame(expected_records)
+            st.markdown(f"**📈 향후 6개월 누적 예상 배당금:** 약 {int(total_6_months_krw):,.0f} 원 <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
             
-            # 1. 차트 세부 표시: 어떤 자산에서 배당이 나오는지 종목명별 시각화
-            fig_next = px.bar(next_div_df, x='종목명', y='환산 예상금액(원)', color='통화', text='환산 예상금액(원)', color_discrete_sequence=['#4DABF7', '#51CF66'])
-            fig_next.update_traces(texttemplate='%{text:,.0f}', textposition="outside", cliponaxis=False)
-            fig_next.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=10, l=10, r=10), showlegend=False)
+            # 1. 6개월 추이 누적 막대 차트 (종목별 세분화)
+            fig_next = px.bar(next_div_df, x='연월', y='환산 예상금액(원)', color='종목명', 
+                              hover_data={'예상 배당금': ':.2f', '통화': True},
+                              color_discrete_sequence=pastel_colors)
+            fig_next.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=10, l=10, r=10), barmode='stack')
             st.plotly_chart(fig_next, use_container_width=True)
             
-            # 2. 영수증 형태의 세부 표
-            st.markdown("**🧾 세부 배당 예정 종목**")
+            # 2. 월별 세부 리스트업 영수증
+            st.markdown("**🧾 향후 6개월 종목별 세부 배당 캘린더**")
             display_next = next_div_df.copy()
             display_next['예상 배당금'] = display_next.apply(lambda x: f"${x['예상 배당금']:,.2f}" if x['통화']=='USD' else f"{x['예상 배당금']:,.0f}원", axis=1)
             display_next['주당 배당금'] = display_next.apply(lambda x: f"${x['예상 주당배당금']:,.2f}" if x['통화']=='USD' else f"{x['예상 주당배당금']:,.0f}원", axis=1)
             
+            # 날짜순 정렬
+            display_next.sort_values(by=['연월', '환산 예상금액(원)'], ascending=[True, False], inplace=True)
+            
             st.dataframe(
-                display_next[['종목명', '수량', '주당 배당금', '예상 배당금', '환산 예상금액(원)']].style
+                display_next[['연월', '종목명', '수량', '주당 배당금', '예상 배당금', '환산 예상금액(원)']].style
                 .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'})
                 .format({'수량': '{:,.1f}', '환산 예상금액(원)': '{:,.0f}원'}),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 한국 주식 등 일부 종목은 야후 파이낸스 데이터 제공 지연으로 스캔에서 누락될 수 있습니다.")
+            st.caption("※ 과거 2년 치 배당 패턴을 분석한 결과이며, 한국 주식 등 일부 종목은 데이터 제공 지연으로 누락될 수 있습니다.")
         else:
-            st.caption(f"아직 {next_month}월에 배당이 확실하게 예정된 보유 종목이 없거나, 배당 데이터가 수집되지 않았습니다.")
+            st.caption("보유 종목 중 향후 6개월 내에 배당이 확실하게 예정된 종목이 없습니다.")
