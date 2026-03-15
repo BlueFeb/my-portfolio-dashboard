@@ -49,13 +49,12 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
-    /* 🌟 Expander(드롭다운) 여백 최소화 */
     [data-testid="stExpander"] {{ margin-top: -5px; }}
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 2. 🌟 다이내믹 매크로 지표 관리 및 영구 저장 시스템 ---
+# --- 2. 다이내믹 매크로 지표 관리 및 영구 저장 시스템 ---
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "^KS11", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "^KQ11", "prefix": "", "suffix": "", "inverse": False},
@@ -96,6 +95,8 @@ def save_macro_settings(selected):
 @st.cache_data(ttl=300) 
 def get_macro_indicators(selected_names_tuple):
     results = {}
+    if not selected_names_tuple: return results
+    
     for name in selected_names_tuple:
         info = INDICATORS_CONFIG.get(name)
         if not info: continue
@@ -165,9 +166,8 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 다이내믹 커스텀 전광판 렌더링 (원라인 레이아웃 적용)
+# 🌟 다이내믹 커스텀 전광판 렌더링
 # =========================================================
-# 제목과 설정 버튼을 7:3 비율로 한 줄에 배치합니다.
 col_title, col_setting = st.columns([7, 3])
 
 with col_title:
@@ -181,13 +181,16 @@ with col_setting:
             options=list(INDICATORS_CONFIG.keys()),
             default=saved_indicators,
             max_selections=9,
-            label_visibility="collapsed" # 모바일 공간 절약을 위해 라벨 숨김
+            label_visibility="collapsed"
         )
         if selected_indicators != saved_indicators:
             save_macro_settings(selected_indicators)
 
+# 🚨 NameError 원천 차단: 블록 진입 전 변수 초기화
+macro_data = {} 
+
 if not selected_indicators:
-    st.caption("선택된 지표가 없습니다. 제어판에서 지표를 선택해 주세요.")
+    st.caption("선택된 지표가 없습니다. 우측 ⚙️ 버튼을 눌러 지표를 추가해 주세요.")
 else:
     macro_data = get_macro_indicators(tuple(selected_indicators))
     html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; margin-bottom: 20px;">'
@@ -230,7 +233,7 @@ st.markdown("---")
 
 
 # =========================================================
-# 🌟 포트폴리오 계산 로직
+# 🌟 포트폴리오 계산 로직 (전광판 UI와 완벽 분리!)
 # =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
@@ -258,8 +261,10 @@ else:
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    usd_krw_price = macro_data.get("💱 원/달러", {}).get("current", 0.0) if "💱 원/달러" in macro_data else 0.0
-    if usd_krw_price <= 0.0: usd_krw_price = 1450.0
+    # 🚨 의존성 완전 분리: 전광판 설정에 관계없이 실시간 환율을 무조건 직접 가져옵니다!
+    usd_krw_price, _ = get_market_data("KRW=X")
+    if usd_krw_price <= 0.0: 
+        usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
     for index, row in holdings.iterrows():
