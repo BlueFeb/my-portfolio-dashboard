@@ -166,36 +166,42 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 다이내믹 커스텀 전광판 렌더링
+# 🌟 [버그 수정 완료] 다이내믹 커스텀 전광판 렌더링 (콜백 엔진 적용)
 # =========================================================
+# 🚨 1. 상태 동기화 버그 방지: 세션 초기화
+if "macro_selector" not in st.session_state:
+    st.session_state.macro_selector = load_macro_settings()
+
+# 🚨 2. 콜백 함수: 클릭 즉시 화면을 그리기 전에 무조건 파일부터 강제 저장
+def on_macro_change():
+    save_macro_settings(st.session_state.macro_selector)
+
 col_title, col_setting = st.columns([7, 3])
 
 with col_title:
     st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 8px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
 
 with col_setting:
-    saved_indicators = load_macro_settings()
     with st.expander("⚙️ 지표 설정"):
+        # 🚨 3. multiselect에 콜백(on_change) 연결하여 1-Tick Lag 완벽 제거
         selected_indicators = st.multiselect(
             "최대 9개 선택",
             options=list(INDICATORS_CONFIG.keys()),
-            default=saved_indicators,
+            key="macro_selector",
             max_selections=9,
+            on_change=on_macro_change,
             label_visibility="collapsed"
         )
-        if selected_indicators != saved_indicators:
-            save_macro_settings(selected_indicators)
 
-# 🚨 NameError 원천 차단: 블록 진입 전 변수 초기화
 macro_data = {} 
 
-if not selected_indicators:
+if not st.session_state.macro_selector:
     st.caption("선택된 지표가 없습니다. 우측 ⚙️ 버튼을 눌러 지표를 추가해 주세요.")
 else:
-    macro_data = get_macro_indicators(tuple(selected_indicators))
+    macro_data = get_macro_indicators(tuple(st.session_state.macro_selector))
     html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; margin-bottom: 20px;">'
 
-    for name in selected_indicators:
+    for name in st.session_state.macro_selector:
         data = macro_data.get(name)
         info = INDICATORS_CONFIG[name]
         prefix = info["prefix"]
@@ -233,7 +239,7 @@ st.markdown("---")
 
 
 # =========================================================
-# 🌟 포트폴리오 계산 로직 (전광판 UI와 완벽 분리!)
+# 🌟 포트폴리오 계산 로직
 # =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
@@ -261,7 +267,6 @@ else:
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    # 🚨 의존성 완전 분리: 전광판 설정에 관계없이 실시간 환율을 무조건 직접 가져옵니다!
     usd_krw_price, _ = get_market_data("KRW=X")
     if usd_krw_price <= 0.0: 
         usd_krw_price = 1450.0
