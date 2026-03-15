@@ -108,7 +108,7 @@ else:
 
     # 🚨 환율 0원 파괴 방어
     usd_krw_price, _ = get_market_data("KRW=X")
-    if usd_krw_price <= 0.0: usd_krw_price = 1350.0
+    if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
     for index, row in holdings.iterrows():
