@@ -8,6 +8,8 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import datetime
 import pytz
+import requests
+import re
 
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
@@ -21,6 +23,7 @@ with col2:
 if is_dark_mode:
     bg_color, text_color = "#1E1E1E", "#F0F2F6"
     df_bg, df_text = "#2A2A2A", "#FFFFFF"
+    border_color = "#444444"
     chart_template = "plotly_dark"
     pastel_colors = ['#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF', '#E8BAFF', '#FFC1C1', '#D6A2E8']
     line_color = '#FF99CC'
@@ -29,6 +32,7 @@ if is_dark_mode:
 else:
     bg_color, text_color = "#F8F9FA", "#212529"
     df_bg, df_text = "#FFFFFF", "#212529"
+    border_color = "#E0E0E0"
     chart_template = "plotly_white"
     pastel_colors = ['#FF8A98', '#FFB677', '#E5E570', '#85E39C', '#8AC4FF', '#C785FF', '#FF9B9B', '#C274D8']
     line_color = '#FF6699'
@@ -44,41 +48,49 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
-    /* 🌟 모바일 콤팩트 전광판을 위한 CSS 마법 (위아래 여백 깎기 & 글씨 크기 최적화) */
-    [data-testid="metric-container"] {{ padding: 10px; }}
-    [data-testid="stMetricValue"] {{ font-size: 1.2rem; font-weight: bold; }}
-    [data-testid="stMetricDelta"] {{ font-size: 0.85rem; }}
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 🌟 [신규] 글로벌 매크로 전광판 데이터 로드 (에러 철통 방어) ---
-@st.cache_data(ttl=300) # 5분간 데이터 캐싱 (야후 API 차단 방지)
+# --- 2. 🌟 [신규] 글로벌 매크로 전광판 데이터 로드 (에러 및 VKOSPI 철통 방어) ---
+@st.cache_data(ttl=300) 
 def get_macro_indicators():
     tickers = {
-        "코스피": "^KS11",
-        "나스닥 선물": "NQ=F",
-        "반도체 (SOX)": "^SOX",
-        "원/달러": "KRW=X",
-        "이더리움": "ETH-USD",
-        "미국 공포 (VIX)": "^VIX",
-        "한국 공포 (VKOSPI)": "^VKOSPI"
+        "🇰🇷 코스피": "^KS11",
+        "🇺🇸 나스닥 선물": "NQ=F",
+        "💾 반도체 (SOX)": "^SOX",
+        "💱 원/달러": "KRW=X",
+        "💎 이더리움": "ETH-USD",
+        "🥶 미국 VIX": "^VIX",
+        "🥶 한국 VKOSPI": "^VKOSPI"
     }
     results = {}
     for name, ticker in tickers.items():
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="5d").dropna(subset=['Close'])
+            # 🚨 1mo(한달) 치를 가져와서 중간에 빵꾸난 공휴일 데이터 에러 방어
+            hist = stock.history(period="1mo").dropna(subset=['Close'])
             if len(hist) >= 2:
                 curr = float(hist['Close'].iloc[-1])
                 prev = float(hist['Close'].iloc[-2])
                 results[name] = {"current": curr, "change_pct": ((curr - prev) / prev) * 100, "change_val": curr - prev}
-            elif len(hist) == 1:
-                results[name] = {"current": float(hist['Close'].iloc[0]), "change_pct": 0.0, "change_val": 0.0}
             else: results[name] = None
         except: results[name] = None
+        
+    # 🚨 [특수 방어] 야후가 한국 VKOSPI를 누락했을 경우 네이버 증권 스크래핑 강제 실행
+    if results.get("🥶 한국 VKOSPI") is None:
+        try:
+            res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            curr = float(re.search(r'<em id="now_value">([0-9.]+)</em>', res.text).group(1))
+            change_val = float(re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text).group(1))
+            if "nv01" in res.text.split('<span id="change_value_and_rate">')[1].split('</span>')[0]: 
+                change_val = -change_val # 파란색(하락) 클래스 감지 시 마이너스 처리
+            prev = curr - change_val
+            results["🥶 한국 VKOSPI"] = {"current": curr, "change_pct": (change_val / prev) * 100, "change_val": change_val}
+        except: pass
+
     return results
 
-# --- 3. 데이터 로드 및 1차 무결점 정제 ---
+# --- 3. 포트폴리오 데이터 로드 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -90,8 +102,7 @@ def load_data():
         SHEET_NAME = "MyPortfolio_DB" 
         df_tx = pd.DataFrame(client.open(SHEET_NAME).worksheet("거래내역").get_all_records())
         df_history = pd.DataFrame(client.open(SHEET_NAME).worksheet("일별기록").get_all_records())
-        try:
-            df_pnl = pd.DataFrame(client.open(SHEET_NAME).worksheet("실현손익").get_all_records())
+        try: df_pnl = pd.DataFrame(client.open(SHEET_NAME).worksheet("실현손익").get_all_records())
         except: df_pnl = pd.DataFrame()
             
         return df_tx, df_history, df_pnl
@@ -99,7 +110,6 @@ def load_data():
         st.error(f"⚠️ 구글 시트 연결 오류: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# 🚨 캐시 반환 객체를 직접 수정하지 않도록 깊은 복사(Copy) 적용
 df_raw, df_history_raw, df_pnl_raw = load_data()
 df = df_raw.copy()
 df_history = df_history_raw.copy()
@@ -121,45 +131,57 @@ def get_dividend_history(ticker):
     try:
         if not ticker or not isinstance(ticker, str): return pd.Series(dtype=float)
         hist = yf.Ticker(ticker).history(period="2y")
-        if 'Dividends' in hist.columns:
-            return hist[hist['Dividends'] > 0]['Dividends']
+        if 'Dividends' in hist.columns: return hist[hist['Dividends'] > 0]['Dividends']
     except: pass
     return pd.Series(dtype=float)
 
+
 # =========================================================
-# 🌟 [전광판 UI 렌더링] 포트폴리오 계산 전에 상단에 띄웁니다!
+# 🌟 [모바일 최적화] HTML/CSS 기반 콤팩트 전광판 렌더링
 # =========================================================
 macro_data = get_macro_indicators()
-
 st.markdown("**🌐 글로벌 매크로 전광판**")
-m1, m2, m3, m4 = st.columns(4)
-m5, m6, m7, m8 = st.columns(4) # 비율을 맞추기 위해 4칸으로 분할 후 1칸은 비움
 
-def render_metric(col, label, key, prefix="", suffix="", inverse=False):
-    if key in macro_data and macro_data[key] is not None:
-        val = macro_data[key]["current"]
-        d_val = macro_data[key]["change_val"]
-        d_pct = macro_data[key]["change_pct"]
-        # VIX 지수처럼 오르는게 '나쁜' 지표는 inverse=True를 주어 색상을 반전시킵니다.
-        d_color = "inverse" if inverse else "normal"
-        col.metric(label=label, value=f"{prefix}{val:,.2f}{suffix}", delta=f"{d_val:+,.2f} ({d_pct:+.2f}%)", delta_color=d_color)
+# Flexbox를 사용하여 화면 크기에 맞춰 카드가 3열~4열로 자동 정렬되도록 CSS 작성
+html_cards = f"""<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;">"""
+
+display_order = ["🇰🇷 코스피", "🇺🇸 나스닥 선물", "💾 반도체 (SOX)", "💱 원/달러", "💎 이더리움", "🥶 미국 VIX", "🥶 한국 VKOSPI"]
+
+for name in display_order:
+    data = macro_data.get(name)
+    prefix = "$" if "이더리움" in name else ""
+    suffix = "원" if "원/달러" in name else ""
+    
+    if data is not None:
+        curr, d_val, d_pct = data["current"], data["change_val"], data["change_pct"]
+        # VIX 지수나 다른 지수 모두 상승(+)하면 붉은색, 하락(-)하면 푸른색 적용
+        if d_val > 0: color = profit_up_color
+        elif d_val < 0: color = profit_down_color
+        else: color = text_color
+        
+        html_cards += f"""
+        <div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>
+            <div style="font-size: 15px; font-weight: bold; color: {text_color}; margin-bottom: 2px;">{prefix}{curr:,.2f}{suffix}</div>
+            <div style="font-size: 11px; font-weight: bold; color: {color};">{d_val:+,.2f} ({d_pct:+.2f}%)</div>
+        </div>
+        """
     else:
-        col.metric(label=label, value="데이터 지연", delta="-")
-
-render_metric(m1, "🇰🇷 코스피", "코스피")
-render_metric(m2, "🇺🇸 나스닥 선물", "나스닥 선물")
-render_metric(m3, "💾 반도체 (SOX)", "반도체 (SOX)")
-render_metric(m4, "💱 원/달러", "원/달러", suffix="원")
-
-render_metric(m5, "💎 이더리움", "이더리움", prefix="$")
-render_metric(m6, "🥶 미국 공포 (VIX)", "미국 공포 (VIX)", inverse=True) # 색상 반전 (상승=위험)
-render_metric(m7, "🥶 한국 공포 (VKOSPI)", "한국 공포 (VKOSPI)", inverse=True) # 색상 반전 (상승=위험)
-# m8은 모바일 배열의 아름다움을 위해 빈 공간으로 둡니다.
-
+        # 데이터 지연 시 회색으로 처리
+        html_cards += f"""
+        <div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; opacity: 0.6;">
+            <div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>
+            <div style="font-size: 13px; font-weight: bold; color: gray; margin-bottom: 2px;">데이터 지연</div>
+            <div style="font-size: 11px; color: gray;">-</div>
+        </div>
+        """
+html_cards += "</div>"
+st.markdown(html_cards, unsafe_allow_html=True)
 st.markdown("---")
 
+
 # =========================================================
-# 🌟 내 포트폴리오 계산 로직
+# 🌟 포트폴리오 계산 로직
 # =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
@@ -187,8 +209,8 @@ else:
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    # 🚨 1450원 환율 기본값 (전광판과 동일하게)
-    usd_krw_price = macro_data.get("원/달러", {}).get("current", 0.0) if macro_data.get("원/달러") else 0.0
+    # 🚨 1450원 환율 0원 파괴 방어
+    usd_krw_price = macro_data.get("💱 원/달러", {}).get("current", 0.0) if macro_data.get("💱 원/달러") else 0.0
     if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
@@ -343,7 +365,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭 
+    # 🌟 상세 데이터 탭
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
