@@ -15,8 +15,11 @@ import os
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
-# 🌟 모바일 한 줄(One-line) 강제 정렬을 위한 CSS 및 테마 설정
-is_dark_mode = st.sidebar.toggle("다크 모드 켜기", value=True)
+# 🚨 줄바꿈 원인이던 다크모드 토글을 사이드바로 이동하여 메인 화면 공간 완벽 확보
+is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
+st.sidebar.caption("화면 테마를 변경할 수 있습니다.")
+
+st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 
 if is_dark_mode:
     bg_color, text_color = "#1E1E1E", "#F0F2F6"
@@ -46,28 +49,12 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
-    
-    /* 🌟 모바일에서 한 줄로 강제 정렬하는 CSS 마법 */
-    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] {{
-        flex-wrap: nowrap !important;
-        align-items: center !important;
-    }}
-    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{
-        width: 75% !important;
-        flex: 1 1 75% !important;
-        min-width: 75% !important;
-    }}
-    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
-        width: 25% !important;
-        flex: 1 1 25% !important;
-        min-width: 25% !important;
-    }}
     [data-testid="stExpander"] {{ margin-top: -10px; }}
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 2. 다이내믹 매크로 지표 관리 시스템 ---
+# --- 2. 다이내믹 매크로 지표 관리 및 영구 저장 시스템 ---
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "^KS11", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "^KQ11", "prefix": "", "suffix": "", "inverse": False},
@@ -174,57 +161,32 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 [디자인 혁신] 모바일 원라인(One-line) 메인 헤더 및 전광판
+# 🌟 [해결완료] 모바일 100% 원라인 보장 UI
 # =========================================================
-st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
-c1, c2 = st.columns([7, 3])
-with c1:
-    st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
-with c2:
-    st.caption("") # 줄 맞춤용 빈 공간
-
 if "macro_selector" not in st.session_state:
     st.session_state.macro_selector = load_macro_settings()
 
 def on_macro_change():
     save_macro_settings(st.session_state.macro_selector)
 
-st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
-col_title, col_setting = st.columns([7, 3])
-
-with col_title:
-    st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 5px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
-
-with col_setting:
-    # 🚨 모바일 공간 최적화: Popover(팝오버 버튼) 적용. 지원 안 할 시 Expander로 우회
-    try:
-        with st.popover("⚙️ 설정", use_container_width=True):
-            selected_indicators = st.multiselect(
-                "최대 9개 선택",
-                options=list(INDICATORS_CONFIG.keys()),
-                key="macro_selector",
-                max_selections=9,
-                on_change=on_macro_change,
-                label_visibility="collapsed"
-            )
-    except AttributeError:
-        with st.expander("⚙️ 설정"):
-            selected_indicators = st.multiselect(
-                "최대 9개 선택",
-                options=list(INDICATORS_CONFIG.keys()),
-                key="macro_selector",
-                max_selections=9,
-                on_change=on_macro_change,
-                label_visibility="collapsed"
-            )
+# 🚨 강제 CSS 대신 아예 제목과 설정창을 통합하여 무조건 1줄 보장
+with st.expander("🌐 글로벌 매크로 전광판 (⚙️ 지표 설정)"):
+    st.multiselect(
+        "표시할 지표 선택 (최대 9개)",
+        options=list(INDICATORS_CONFIG.keys()),
+        key="macro_selector",
+        max_selections=9,
+        on_change=on_macro_change,
+        label_visibility="collapsed"
+    )
 
 macro_data = {} 
 
 if not st.session_state.macro_selector:
-    st.caption("선택된 지표가 없습니다. 우측 ⚙️ 버튼을 눌러 지표를 추가해 주세요.")
+    st.caption("선택된 지표가 없습니다. 위의 설정 창을 열어 지표를 추가해 주세요.")
 else:
     macro_data = get_macro_indicators(tuple(st.session_state.macro_selector))
-    html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; margin-bottom: 20px;">'
+    html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;">'
 
     for name in st.session_state.macro_selector:
         data = macro_data.get(name)
