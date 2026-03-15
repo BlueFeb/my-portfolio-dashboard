@@ -10,6 +10,7 @@ import datetime
 import pytz
 import requests
 import re
+import os
 
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
@@ -48,12 +49,13 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
+    /* 🌟 Expander(드롭다운) 여백 최소화 */
+    [data-testid="stExpander"] {{ margin-top: -5px; }}
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 2. 🌟 [신규] 다이내믹 매크로 지표 사전 정의 ---
-# 원하는 지표를 쉽게 관리할 수 있는 메타데이터 딕셔너리입니다.
+# --- 2. 🌟 다이내믹 매크로 지표 관리 및 영구 저장 시스템 ---
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "^KS11", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "^KQ11", "prefix": "", "suffix": "", "inverse": False},
@@ -67,9 +69,29 @@ INDICATORS_CONFIG = {
     "💎 이더리움": {"ticker": "ETH-USD", "prefix": "$", "suffix": "", "inverse": False},
     "🛢️ WTI 원유": {"ticker": "CL=F", "prefix": "$", "suffix": "", "inverse": False},
     "🥇 금 선물": {"ticker": "GC=F", "prefix": "$", "suffix": "", "inverse": False},
-    "📈 10년물 국채 금리": {"ticker": "^TNX", "prefix": "", "suffix": "%", "inverse": True}, # 금리 상승은 하락색(파란색)으로 표시할지 선택 (여기선 위험(빨강)으로 표시)
-    "🥶 미국 VIX": {"ticker": "^VIX", "prefix": "", "suffix": "", "inverse": True},       # VIX 상승은 위험(빨간색)으로 표시
+    "📈 10년물 국채 금리": {"ticker": "^TNX", "prefix": "", "suffix": "%", "inverse": True}, 
+    "🥶 미국 VIX": {"ticker": "^VIX", "prefix": "", "suffix": "", "inverse": True},       
 }
+
+SETTINGS_FILE = "macro_settings.json"
+
+def load_macro_settings():
+    default_inds = ["🇰🇷 코스피", "🇺🇸 S&P 500 선물", "🇺🇸 나스닥 선물", "💱 원/달러", "🛢️ WTI 원유", "💎 비트코인", "🥶 미국 VIX"]
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, "r") as f:
+                data = json.load(f)
+                saved = data.get("indicators", [])
+                valid_saved = [x for x in saved if x in INDICATORS_CONFIG]
+                if valid_saved: return valid_saved
+    except: pass
+    return default_inds
+
+def save_macro_settings(selected):
+    try:
+        with open(SETTINGS_FILE, "w") as f:
+            json.dump({"indicators": selected}, f)
+    except: pass
 
 @st.cache_data(ttl=300) 
 def get_macro_indicators(selected_names_tuple):
@@ -85,7 +107,6 @@ def get_macro_indicators(selected_names_tuple):
                 curr = float(hist['Close'].iloc[-1])
                 prev = float(hist['Close'].iloc[-2])
                 
-                # 🚨 100엔당 원화 환율 특별 변환 로직
                 if info["ticker"] == "JPYKRW=X":
                     curr *= 100
                     prev *= 100
@@ -95,7 +116,6 @@ def get_macro_indicators(selected_names_tuple):
                 results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
             else: results[name] = None
         except: results[name] = None
-
     return results
 
 # --- 3. 데이터 로드 및 1차 무결점 정제 ---
@@ -145,27 +165,32 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 [신규] 다이내믹 커스텀 전광판 렌더링
+# 🌟 다이내믹 커스텀 전광판 렌더링 (원라인 레이아웃 적용)
 # =========================================================
-st.markdown("**🌐 글로벌 매크로 전광판**")
+# 제목과 설정 버튼을 7:3 비율로 한 줄에 배치합니다.
+col_title, col_setting = st.columns([7, 3])
 
-# 사용자가 지표를 선택할 수 있는 제어판 (최대 9개 제한)
-with st.expander("⚙️ 전광판 지표 설정 (최대 9개 선택 가능)"):
-    default_selections = ["🇰🇷 코스피", "🇺🇸 S&P 500 선물", "🇺🇸 나스닥 선물", "💱 원/달러", "🛢️ WTI 원유", "💎 비트코인", "🥶 미국 VIX"]
-    selected_indicators = st.multiselect(
-        "표시할 지표를 선택하세요:",
-        options=list(INDICATORS_CONFIG.keys()),
-        default=default_selections,
-        max_selections=9
-    )
+with col_title:
+    st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 8px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
+
+with col_setting:
+    saved_indicators = load_macro_settings()
+    with st.expander("⚙️ 지표 설정"):
+        selected_indicators = st.multiselect(
+            "최대 9개 선택",
+            options=list(INDICATORS_CONFIG.keys()),
+            default=saved_indicators,
+            max_selections=9,
+            label_visibility="collapsed" # 모바일 공간 절약을 위해 라벨 숨김
+        )
+        if selected_indicators != saved_indicators:
+            save_macro_settings(selected_indicators)
 
 if not selected_indicators:
     st.caption("선택된 지표가 없습니다. 제어판에서 지표를 선택해 주세요.")
 else:
-    # Tuple로 변환하여 캐시 함수에 전달
     macro_data = get_macro_indicators(tuple(selected_indicators))
-
-    html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;">'
+    html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; margin-bottom: 20px;">'
 
     for name in selected_indicators:
         data = macro_data.get(name)
@@ -176,17 +201,15 @@ else:
         if data is not None:
             curr, d_val, d_pct = data["current"], data["change_val"], data["change_pct"]
             
-            # 🚨 Inverse 로직: VIX나 국채금리 등은 오르면 붉은색(위험), 내리면 푸른색(안정)
             if info["inverse"]:
-                if d_val > 0: color = profit_up_color # 오르면 위험(빨강)
-                elif d_val < 0: color = profit_down_color # 내리면 안정(파랑)
+                if d_val > 0: color = profit_up_color 
+                elif d_val < 0: color = profit_down_color 
                 else: color = text_color
             else:
-                if d_val > 0: color = profit_up_color # 수익(빨강)
-                elif d_val < 0: color = profit_down_color # 손실(파랑)
+                if d_val > 0: color = profit_up_color 
+                elif d_val < 0: color = profit_down_color 
                 else: color = text_color
             
-            # 소수점 표시 처리 (비트코인, 코스피 등 단위가 큰 건 2자리, 환율 등은 상황에 맞게)
             format_str = ",.2f" if "비트코인" not in name else ",.1f"
             
             html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">'
@@ -207,7 +230,7 @@ st.markdown("---")
 
 
 # =========================================================
-# 🌟 포트폴리오 계산 로직 (전광판과 완벽 분리되어 안전함)
+# 🌟 포트폴리오 계산 로직
 # =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
@@ -235,8 +258,7 @@ else:
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    # 🚨 전광판 선택과 무관하게 독립적으로 포트폴리오용 환율을 조회합니다. (0원 에러 방어 포함)
-    usd_krw_price, _ = get_market_data("KRW=X")
+    usd_krw_price = macro_data.get("💱 원/달러", {}).get("current", 0.0) if "💱 원/달러" in macro_data else 0.0
     if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
@@ -391,7 +413,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭
+    # 🌟 상세 데이터 탭 
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
