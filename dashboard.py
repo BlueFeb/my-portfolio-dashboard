@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import gspread
 import plotly.express as px
@@ -8,7 +9,7 @@ import json
 import datetime
 import pytz
 
-# --- 1. 기본 설정 (아이콘 및 제목) ---
+# --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
 col1, col2 = st.columns([8, 2])
@@ -46,7 +47,7 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 데이터 로드 및 전처리 (무결점 방어 로직) ---
+# --- 2. 데이터 로드 및 전처리 (캐시 오염 방어 100%) ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -56,25 +57,27 @@ def load_data():
         client = gspread.authorize(creds)
         
         SHEET_NAME = "MyPortfolio_DB" 
-        sheet_tx = client.open(SHEET_NAME).worksheet("거래내역")
-        sheet_history = client.open(SHEET_NAME).worksheet("일별기록")
+        df_tx = pd.DataFrame(client.open(SHEET_NAME).worksheet("거래내역").get_all_records())
+        df_history = pd.DataFrame(client.open(SHEET_NAME).worksheet("일별기록").get_all_records())
         try:
-            sheet_pnl = client.open(SHEET_NAME).worksheet("실현손익")
-            df_pnl = pd.DataFrame(sheet_pnl.get_all_records())
-        except:
-            df_pnl = pd.DataFrame()
+            df_pnl = pd.DataFrame(client.open(SHEET_NAME).worksheet("실현손익").get_all_records())
+        except: df_pnl = pd.DataFrame()
             
-        return pd.DataFrame(sheet_tx.get_all_records()), pd.DataFrame(sheet_history.get_all_records()), df_pnl
+        return df_tx, df_history, df_pnl
     except Exception as e:
-        st.error(f"⚠️ 데이터 로드 중 오류 발생: {e}")
+        st.error(f"⚠️ 구글 시트 연결 오류: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-df, df_history, df_pnl = load_data()
+# 🚨 캐시 반환된 객체를 직접 수정하지 않도록 완벽히 깊은 복사(Copy)
+df_raw, df_history_raw, df_pnl_raw = load_data()
+df = df_raw.copy()
+df_history = df_history_raw.copy()
+df_pnl = df_pnl_raw.copy()
 
 @st.cache_data(ttl=60)
 def get_market_data(ticker):
     try:
-        if not ticker: return 0.0, 0.0
+        if not ticker or not isinstance(ticker, str): return 0.0, 0.0
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d").dropna(subset=['Close'])
         if len(hist) >= 2: return float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
@@ -82,11 +85,10 @@ def get_market_data(ticker):
         return 0.0, 0.0
     except: return 0.0, 0.0
 
-# 🌟 [신규] 종목별 과거 배당 이력 캐싱 (6개월 예측용, 속도 최적화)
-@st.cache_data(ttl=86400) # 24시간 유지
+@st.cache_data(ttl=86400) 
 def get_dividend_history(ticker):
     try:
-        if not ticker: return pd.Series(dtype=float)
+        if not ticker or not isinstance(ticker, str): return pd.Series(dtype=float)
         hist = yf.Ticker(ticker).history(period="2y")
         if 'Dividends' in hist.columns:
             return hist[hist['Dividends'] > 0]['Dividends']
@@ -94,14 +96,17 @@ def get_dividend_history(ticker):
     return pd.Series(dtype=float)
 
 if df.empty:
-    st.info("아직 거래 내역이 없습니다.")
+    st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
 else:
-    # 🚨 문자형 오류 방어 (콤마 및 빈칸)
-    for col in ['수량', '거래단가']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    # 🚨 필수 컬럼 존재 여부 체크 방어막
+    required_cols = ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']
+    for col in required_cols:
+        if col not in df.columns: df[col] = 0 if col in ['수량', '거래단가'] else ""
 
-    df['계산용수량'] = df.apply(lambda x: x['수량'] if x['거래종류'] == '매수' else -x['수량'], axis=1)
+    df['수량'] = pd.to_numeric(df['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df['거래단가'] = pd.to_numeric(df['거래단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
+    df['계산용수량'] = df.apply(lambda x: x['수량'] if str(x['거래종류']).strip() == '매수' else -x['수량'], axis=1)
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
     holdings = holdings[holdings['계산용수량'] > 0].copy()
     
@@ -111,12 +116,13 @@ else:
     buy_df = df[df['거래종류'] == '매수'].copy()
     buy_df['결제금액'] = buy_df['수량'] * buy_df['거래단가']
     avg_cost_df = buy_df.groupby(['종목명', '티커'])[['결제금액', '수량']].sum().reset_index()
-    avg_cost_df['평균매입단가'] = avg_cost_df['결제금액'] / avg_cost_df['수량']
+    
+    # 🚨 ZeroDivision & 무한대 파괴 방어
+    avg_cost_df['평균매입단가'] = (avg_cost_df['결제금액'] / avg_cost_df['수량']).replace([np.inf, -np.inf], 0).fillna(0)
     
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    # 🚨 1450원 환율 기본값 방어망
     usd_krw_price, _ = get_market_data("KRW=X")
     if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
@@ -136,7 +142,7 @@ else:
     holdings['평가액(원)'] = total_values_krw
     holdings['손익(원)'] = profit_amounts
     holdings['수익률(%)'] = profit_pcts
-    holdings['평가액(만원)'] = (pd.Series(total_values_krw) / 10000).astype(int)
+    holdings['평가액(만원)'] = (pd.Series(total_values_krw) / 10000).fillna(0).astype(int)
 
     total_asset = sum(total_values_krw)
     total_cost = sum(total_costs_krw)
@@ -170,10 +176,10 @@ else:
 
         df_pnl[['실현손익(외화)', '현재환율적용_실현손익(원)']] = df_pnl.apply(lambda row: pd.Series(calculate_today_krw(row)), axis=1)
         df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'국내' if x['통화']=='KRW' else '해외'})", axis=1)
-        df_pnl['실현손익_차트용(만원)'] = (df_pnl['현재환율적용_실현손익(원)'] / 10000).astype(int)
+        df_pnl['실현손익_차트용(만원)'] = (df_pnl['현재환율적용_실현손익(원)'] / 10000).fillna(0).astype(int)
         
         df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'], errors='coerce')
-        df_pnl = df_pnl.dropna(subset=['날짜'])
+        df_pnl = df_pnl.dropna(subset=['날짜']).copy() # 🚨 경고 방어
         df_pnl['일자'] = df_pnl['날짜'].dt.strftime('%m-%d')
         df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
         df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
@@ -236,7 +242,6 @@ else:
             st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 🌟 심층 썬버스트 차트 ]</div>", unsafe_allow_html=True)
             holdings_positive = holdings[holdings['평가액(만원)'] > 0].copy()
             if not holdings_positive.empty:
-                # 🌟 [요청 반영] 거추장스러운 총자산 루트 삭제! [자산군 -> 종목명]의 2단계로만 심플하게 표시
                 fig_sun = px.sunburst(holdings_positive, path=['자산군', '종목명'], values='평가액(만원)', color_discrete_sequence=pastel_colors)
                 fig_sun.update_traces(textinfo='label+percent entry', textfont=dict(color='black', size=15))
                 fig_sun.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
@@ -245,14 +250,14 @@ else:
                 st.caption("표시할 양수(+) 자산이 없습니다.")
 
     with tab_chart2:
-        if not df_history.empty:
+        if not df_history.empty and df_history.shape[1] >= 2:
             df_history['총자산(만원)'] = pd.to_numeric(df_history[df_history.columns[1]], errors='coerce').fillna(0) / 10000
             fig_line = px.line(df_history, x='날짜', y='총자산(만원)', markers=True)
             fig_line.update_traces(line_color=line_color, marker_color=line_color)
             fig_line.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
             st.plotly_chart(fig_line, use_container_width=True)
         else:
-            st.caption("아직 '일별기록' 시트에 데이터가 없습니다.")
+            st.caption("아직 데이터가 부족하여 차트를 그릴 수 없습니다.")
 
     with tab_chart3:
         if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
@@ -274,7 +279,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭 (기능 3: 향후 6개월 배당 예측 시스템 완벽 구현)
+    # 🌟 상세 데이터 탭
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
@@ -324,7 +329,6 @@ else:
             st.caption("표시할 데이터가 없습니다.")
             
     with tab_data3:
-        # 🌟 향후 6개월 달력 배열 생성 (현재 2026년 3월 기준 -> 4월~9월)
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.datetime.now(kst)
         next_6_months = []
@@ -337,7 +341,7 @@ else:
         expected_records = []
         total_6_months_krw = 0.0
         
-        with st.spinner("과거 2년치 배당 이력을 스캔하여 향후 6개월의 현금흐름을 예측 중입니다... (최초 로딩 시 시간이 소요됩니다)"):
+        with st.spinner("과거 2년치 배당 이력을 스캔하여 향후 6개월의 현금흐름을 예측 중입니다..."):
             for _, row in holdings.iterrows():
                 ticker = row['티커']
                 name = row['종목명']
@@ -347,18 +351,14 @@ else:
                 divs = get_dividend_history(ticker)
                 if divs.empty: continue
                 
-                # 월배당 여부 확인 (2년 중 18번 이상 주면 월배당으로 간주)
                 is_monthly = len(divs) >= 18
                 
                 for y, m in next_6_months:
                     dps = 0.0
-                    if is_monthly:
-                        dps = float(divs.iloc[-1]) # 월배당은 가장 최근 금액 반영
+                    if is_monthly: dps = float(divs.iloc[-1]) 
                     else:
-                        # 해당 특정 달(m)에 배당을 준 적이 있는지 과거 내역 스캔
                         month_divs = divs[divs.index.month == m]
-                        if not month_divs.empty:
-                            dps = float(month_divs.iloc[-1])
+                        if not month_divs.empty: dps = float(month_divs.iloc[-1])
                             
                     if dps > 0:
                         expected_div = dps * qty
@@ -370,6 +370,7 @@ else:
                             '연월': f"{y}년 {m:02d}월",
                             '월': m,
                             '종목명': name,
+                            '수량': qty, 
                             '통화': curr,
                             '예상 주당배당금': dps,
                             '예상 배당금': expected_div,
@@ -380,20 +381,17 @@ else:
             next_div_df = pd.DataFrame(expected_records)
             st.markdown(f"**📈 향후 6개월 누적 예상 배당금:** 약 {int(total_6_months_krw):,.0f} 원 <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
             
-            # 1. 6개월 추이 누적 막대 차트 (종목별 세분화)
             fig_next = px.bar(next_div_df, x='연월', y='환산 예상금액(원)', color='종목명', 
                               hover_data={'예상 배당금': ':.2f', '통화': True},
                               color_discrete_sequence=pastel_colors)
             fig_next.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=10, l=10, r=10), barmode='stack')
             st.plotly_chart(fig_next, use_container_width=True)
             
-            # 2. 월별 세부 리스트업 영수증
             st.markdown("**🧾 향후 6개월 종목별 세부 배당 캘린더**")
             display_next = next_div_df.copy()
             display_next['예상 배당금'] = display_next.apply(lambda x: f"${x['예상 배당금']:,.2f}" if x['통화']=='USD' else f"{x['예상 배당금']:,.0f}원", axis=1)
             display_next['주당 배당금'] = display_next.apply(lambda x: f"${x['예상 주당배당금']:,.2f}" if x['통화']=='USD' else f"{x['예상 주당배당금']:,.0f}원", axis=1)
             
-            # 날짜순 정렬
             display_next.sort_values(by=['연월', '환산 예상금액(원)'], ascending=[True, False], inplace=True)
             
             st.dataframe(
@@ -402,6 +400,6 @@ else:
                 .format({'수량': '{:,.1f}', '환산 예상금액(원)': '{:,.0f}원'}),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 과거 2년 치 배당 패턴을 분석한 결과이며, 한국 주식 등 일부 종목은 데이터 제공 지연으로 누락될 수 있습니다.")
+            st.caption("※ 과거 2년 치 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
         else:
             st.caption("보유 종목 중 향후 6개월 내에 배당이 확실하게 예정된 종목이 없습니다.")
