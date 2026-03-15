@@ -44,10 +44,41 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
+    /* 🌟 모바일 콤팩트 전광판을 위한 CSS 마법 (위아래 여백 깎기 & 글씨 크기 최적화) */
+    [data-testid="metric-container"] {{ padding: 10px; }}
+    [data-testid="stMetricValue"] {{ font-size: 1.2rem; font-weight: bold; }}
+    [data-testid="stMetricDelta"] {{ font-size: 0.85rem; }}
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 데이터 로드 및 전처리 (캐시 오염 방어 100%) ---
+# --- 2. 🌟 [신규] 글로벌 매크로 전광판 데이터 로드 (에러 철통 방어) ---
+@st.cache_data(ttl=300) # 5분간 데이터 캐싱 (야후 API 차단 방지)
+def get_macro_indicators():
+    tickers = {
+        "코스피": "^KS11",
+        "나스닥 선물": "NQ=F",
+        "반도체 (SOX)": "^SOX",
+        "원/달러": "KRW=X",
+        "이더리움": "ETH-USD",
+        "미국 공포 (VIX)": "^VIX",
+        "한국 공포 (VKOSPI)": "^VKOSPI"
+    }
+    results = {}
+    for name, ticker in tickers.items():
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="5d").dropna(subset=['Close'])
+            if len(hist) >= 2:
+                curr = float(hist['Close'].iloc[-1])
+                prev = float(hist['Close'].iloc[-2])
+                results[name] = {"current": curr, "change_pct": ((curr - prev) / prev) * 100, "change_val": curr - prev}
+            elif len(hist) == 1:
+                results[name] = {"current": float(hist['Close'].iloc[0]), "change_pct": 0.0, "change_val": 0.0}
+            else: results[name] = None
+        except: results[name] = None
+    return results
+
+# --- 3. 데이터 로드 및 1차 무결점 정제 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -68,7 +99,7 @@ def load_data():
         st.error(f"⚠️ 구글 시트 연결 오류: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-# 🚨 캐시 반환된 객체를 직접 수정하지 않도록 완벽히 깊은 복사(Copy)
+# 🚨 캐시 반환 객체를 직접 수정하지 않도록 깊은 복사(Copy) 적용
 df_raw, df_history_raw, df_pnl_raw = load_data()
 df = df_raw.copy()
 df_history = df_history_raw.copy()
@@ -95,10 +126,44 @@ def get_dividend_history(ticker):
     except: pass
     return pd.Series(dtype=float)
 
+# =========================================================
+# 🌟 [전광판 UI 렌더링] 포트폴리오 계산 전에 상단에 띄웁니다!
+# =========================================================
+macro_data = get_macro_indicators()
+
+st.markdown("**🌐 글로벌 매크로 전광판**")
+m1, m2, m3, m4 = st.columns(4)
+m5, m6, m7, m8 = st.columns(4) # 비율을 맞추기 위해 4칸으로 분할 후 1칸은 비움
+
+def render_metric(col, label, key, prefix="", suffix="", inverse=False):
+    if key in macro_data and macro_data[key] is not None:
+        val = macro_data[key]["current"]
+        d_val = macro_data[key]["change_val"]
+        d_pct = macro_data[key]["change_pct"]
+        # VIX 지수처럼 오르는게 '나쁜' 지표는 inverse=True를 주어 색상을 반전시킵니다.
+        d_color = "inverse" if inverse else "normal"
+        col.metric(label=label, value=f"{prefix}{val:,.2f}{suffix}", delta=f"{d_val:+,.2f} ({d_pct:+.2f}%)", delta_color=d_color)
+    else:
+        col.metric(label=label, value="데이터 지연", delta="-")
+
+render_metric(m1, "🇰🇷 코스피", "코스피")
+render_metric(m2, "🇺🇸 나스닥 선물", "나스닥 선물")
+render_metric(m3, "💾 반도체 (SOX)", "반도체 (SOX)")
+render_metric(m4, "💱 원/달러", "원/달러", suffix="원")
+
+render_metric(m5, "💎 이더리움", "이더리움", prefix="$")
+render_metric(m6, "🥶 미국 공포 (VIX)", "미국 공포 (VIX)", inverse=True) # 색상 반전 (상승=위험)
+render_metric(m7, "🥶 한국 공포 (VKOSPI)", "한국 공포 (VKOSPI)", inverse=True) # 색상 반전 (상승=위험)
+# m8은 모바일 배열의 아름다움을 위해 빈 공간으로 둡니다.
+
+st.markdown("---")
+
+# =========================================================
+# 🌟 내 포트폴리오 계산 로직
+# =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
 else:
-    # 🚨 필수 컬럼 존재 여부 체크 방어막
     required_cols = ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']
     for col in required_cols:
         if col not in df.columns: df[col] = 0 if col in ['수량', '거래단가'] else ""
@@ -117,13 +182,13 @@ else:
     buy_df['결제금액'] = buy_df['수량'] * buy_df['거래단가']
     avg_cost_df = buy_df.groupby(['종목명', '티커'])[['결제금액', '수량']].sum().reset_index()
     
-    # 🚨 ZeroDivision & 무한대 파괴 방어
     avg_cost_df['평균매입단가'] = (avg_cost_df['결제금액'] / avg_cost_df['수량']).replace([np.inf, -np.inf], 0).fillna(0)
     
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    usd_krw_price, _ = get_market_data("KRW=X")
+    # 🚨 1450원 환율 기본값 (전광판과 동일하게)
+    usd_krw_price = macro_data.get("원/달러", {}).get("current", 0.0) if macro_data.get("원/달러") else 0.0
     if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
@@ -179,7 +244,7 @@ else:
         df_pnl['실현손익_차트용(만원)'] = (df_pnl['현재환율적용_실현손익(원)'] / 10000).fillna(0).astype(int)
         
         df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'], errors='coerce')
-        df_pnl = df_pnl.dropna(subset=['날짜']).copy() # 🚨 경고 방어
+        df_pnl = df_pnl.dropna(subset=['날짜']).copy() 
         df_pnl['일자'] = df_pnl['날짜'].dt.strftime('%m-%d')
         df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
         df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
@@ -194,7 +259,6 @@ else:
         
         total_realized_krw = t_sell_krw + t_sell_usd_krw + t_div_krw + t_div_usd_krw
 
-    # 🌟 실현손익 요약 표
     st.markdown("**💸 실현 손익 및 배당금 요약** <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
     
     summary_data = {
@@ -279,7 +343,7 @@ else:
     st.markdown("---")
 
     # =========================================================
-    # 🌟 상세 데이터 탭
+    # 🌟 상세 데이터 탭 
     # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
