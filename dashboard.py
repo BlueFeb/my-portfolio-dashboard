@@ -11,13 +11,15 @@ import pytz
 import requests
 import re
 import os
+import time
 
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
-# 🚨 줄바꿈 원인이던 다크모드 토글을 사이드바로 이동하여 메인 화면 공간 완벽 확보
+# 🌟 사이드바: 다크모드 및 실시간 새로고침 스위치
 is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
-st.sidebar.caption("화면 테마를 변경할 수 있습니다.")
+auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
+st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
 st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 
@@ -49,15 +51,33 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
+    
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] {{
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+    }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{
+        width: 75% !important;
+        flex: 1 1 75% !important;
+        min-width: 75% !important;
+    }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
+        width: 25% !important;
+        flex: 1 1 25% !important;
+        min-width: 25% !important;
+    }}
     [data-testid="stExpander"] {{ margin-top: -10px; }}
     </style>
 """, unsafe_allow_html=True)
 
 
-# --- 2. 다이내믹 매크로 지표 관리 및 영구 저장 시스템 ---
+# --- 2. 다이내믹 매크로 지표 관리 ---
+# 🚨 삼성전자와 SK하이닉스 추가 완료!
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "^KS11", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "^KQ11", "prefix": "", "suffix": "", "inverse": False},
+    "🇰🇷 삼성전자": {"ticker": "005930.KS", "prefix": "", "suffix": "원", "inverse": False},
+    "🇰🇷 SK하이닉스": {"ticker": "000660.KS", "prefix": "", "suffix": "원", "inverse": False},
     "🇺🇸 S&P 500 선물": {"ticker": "ES=F", "prefix": "", "suffix": "", "inverse": False},
     "🇺🇸 나스닥 선물": {"ticker": "NQ=F", "prefix": "", "suffix": "", "inverse": False},
     "🇺🇸 다우존스 선물": {"ticker": "YM=F", "prefix": "", "suffix": "", "inverse": False},
@@ -75,7 +95,7 @@ INDICATORS_CONFIG = {
 SETTINGS_FILE = "macro_settings.json"
 
 def load_macro_settings():
-    default_inds = ["🇰🇷 코스피", "🇺🇸 S&P 500 선물", "🇺🇸 나스닥 선물", "💱 원/달러", "🛢️ WTI 원유", "💎 비트코인", "🥶 미국 VIX"]
+    default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇺🇸 나스닥 선물", "💱 원/달러", "💎 비트코인"]
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r") as f:
@@ -92,7 +112,8 @@ def save_macro_settings(selected):
             json.dump({"indicators": selected}, f)
     except: pass
 
-@st.cache_data(ttl=300) 
+# 🚨 전광판 시세는 30초마다 새로고침 (야후 밴 방어 마지노선)
+@st.cache_data(ttl=30) 
 def get_macro_indicators(selected_names_tuple):
     results = {}
     if not selected_names_tuple: return results
@@ -115,7 +136,7 @@ def get_macro_indicators(selected_names_tuple):
         except: results[name] = None
     return results
 
-# --- 3. 데이터 로드 및 1차 무결점 정제 ---
+# 🚨 구글 시트는 60초마다 새로고침 (API 쿼터 제한 방어)
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -139,7 +160,8 @@ df = df_raw.copy()
 df_history = df_history_raw.copy()
 df_pnl = df_pnl_raw.copy()
 
-@st.cache_data(ttl=60)
+# 🚨 내 종목 현재가도 30초마다 갱신
+@st.cache_data(ttl=30)
 def get_market_data(ticker):
     try:
         if not ticker or not isinstance(ticker, str): return 0.0, 0.0
@@ -161,7 +183,7 @@ def get_dividend_history(ticker):
 
 
 # =========================================================
-# 🌟 [해결완료] 모바일 100% 원라인 보장 UI
+# 🌟 모바일 100% 원라인 보장 UI
 # =========================================================
 if "macro_selector" not in st.session_state:
     st.session_state.macro_selector = load_macro_settings()
@@ -169,7 +191,6 @@ if "macro_selector" not in st.session_state:
 def on_macro_change():
     save_macro_settings(st.session_state.macro_selector)
 
-# 🚨 강제 CSS 대신 아예 제목과 설정창을 통합하여 무조건 1줄 보장
 with st.expander("🌐 글로벌 매크로 전광판 (⚙️ 지표 설정)"):
     st.multiselect(
         "표시할 지표 선택 (최대 9개)",
@@ -206,7 +227,7 @@ else:
                 elif d_val < 0: color = profit_down_color 
                 else: color = text_color
             
-            format_str = ",.2f" if "비트코인" not in name else ",.1f"
+            format_str = ",.2f" if "비트코인" not in name else ",.0f" if "원" in suffix else ",.2f"
             
             html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">'
             html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
@@ -351,11 +372,7 @@ else:
 
     st.markdown("---")
 
-    # =========================================================
-    # 🌟 차트 분석 탭
-    # =========================================================
     st.markdown("**📊 포트폴리오 시각화**")
-    
     tab_chart1, tab_chart2, tab_chart3 = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익"])
 
     with tab_chart1:
@@ -409,9 +426,6 @@ else:
 
     st.markdown("---")
 
-    # =========================================================
-    # 🌟 상세 데이터 탭 
-    # =========================================================
     st.markdown("**📋 상세 데이터**")
     tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
 
@@ -534,3 +548,8 @@ else:
             st.caption("※ 과거 2년 치 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
         else:
             st.caption("보유 종목 중 향후 6개월 내에 배당이 확실하게 예정된 종목이 없습니다.")
+
+# 🚨 마지막 줄: 실시간 자동 새로고침(Auto Refresh) 무한 루프 엔진
+if auto_refresh:
+    time.sleep(30)
+    st.rerun()
