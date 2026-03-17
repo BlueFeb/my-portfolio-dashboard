@@ -21,6 +21,18 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
+# 🚀 [기능 5] 리밸런싱을 위한 사이드바 목표 비중 슬라이더 추가
+st.sidebar.markdown("---")
+st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
+target_stock = st.sidebar.slider("주식 비중", 0, 100, 60)
+target_crypto = st.sidebar.slider("코인 비중", 0, 100, 10)
+target_bond = st.sidebar.slider("채권 비중", 0, 100, 20)
+target_cash = st.sidebar.slider("현금 비중", 0, 100, 10)
+
+total_target = target_stock + target_crypto + target_bond + target_cash
+if total_target != 100:
+    st.sidebar.error(f"⚠️ 목표 비중의 합이 100%가 아닙니다. (현재: {total_target}%)")
+
 st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 
 if is_dark_mode:
@@ -51,27 +63,16 @@ st.markdown(f"""
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
-    
     div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] {{
         flex-wrap: nowrap !important;
         align-items: center !important;
     }}
-    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{
-        width: 75% !important;
-        flex: 1 1 75% !important;
-        min-width: 75% !important;
-    }}
-    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{
-        width: 25% !important;
-        flex: 1 1 25% !important;
-        min-width: 25% !important;
-    }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{ width: 75% !important; flex: 1 1 75% !important; min-width: 75% !important; }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{ width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; }}
     [data-testid="stExpander"] {{ margin-top: -10px; }}
     </style>
 """, unsafe_allow_html=True)
 
-
-# --- 2. 다이내믹 매크로 지표 관리 ---
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
@@ -108,31 +109,25 @@ def load_macro_settings():
 
 def save_macro_settings(selected):
     try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump({"indicators": selected}, f)
+        with open(SETTINGS_FILE, "w") as f: json.dump({"indicators": selected}, f)
     except: pass
 
-# 🚀 개별 매크로 지표 패치 함수 (멀티스레딩용)
 def fetch_single_macro(name, info):
     try:
         if info["src"] == "naver_index":
             res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
             data = res.json()['datas'][0]
-            curr = float(data['closePrice'].replace(',', ''))
-            change_pct = float(data['fluctuationsRatio'])
+            curr, change_pct = float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
             change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
             if change_pct < 0: change_val = -change_val
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-        
         elif info["src"] == "naver_stock":
             res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
             data = res.json()['datas'][0]
-            curr = float(data['closePrice'].replace(',', ''))
-            change_pct = float(data['fluctuationsRatio'])
+            curr, change_pct = float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
             change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
             if change_pct < 0: change_val = -change_val
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-
         elif info["src"] == "naver_vkospi":
             res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
             curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
@@ -144,28 +139,21 @@ def fetch_single_macro(name, info):
                 prev = curr - change_val
                 return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
             return name, None
-        
         elif info["src"] == "yahoo":
-            # 🚀 period를 1mo -> 5d로 대폭 단축하여 통신 속도 극대화
             stock = yf.Ticker(info["ticker"])
             hist = stock.history(period="5d").dropna(subset=['Close'])
             if len(hist) >= 2:
-                curr = float(hist['Close'].iloc[-1])
-                prev = float(hist['Close'].iloc[-2])
-                if info["ticker"] == "JPYKRW=X":
-                    curr *= 100; prev *= 100
+                curr, prev = float(hist['Close'].iloc[-1]), float(hist['Close'].iloc[-2])
+                if info["ticker"] == "JPYKRW=X": curr *= 100; prev *= 100
                 change_val = curr - prev
-                change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
-                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+                return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev != 0 else 0.0, "change_val": change_val}
             return name, None
     except: return name, None
 
-# 🚀 멀티스레딩 병렬 처리로 모든 지표를 동시에 1초 만에 긁어옵니다.
 @st.cache_data(ttl=30) 
 def get_macro_indicators(selected_names_tuple):
     results = {}
     if not selected_names_tuple: return results
-    
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(fetch_single_macro, name, INDICATORS_CONFIG[name]): name for name in selected_names_tuple}
         for future in as_completed(futures):
@@ -173,8 +161,6 @@ def get_macro_indicators(selected_names_tuple):
             results[name] = res
     return results
 
-
-# --- 3. 데이터 로드 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -182,7 +168,6 @@ def load_data():
         creds_dict = json.loads(st.secrets["google_credentials"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
-        
         SHEET_NAME = "MyPortfolio_DB" 
         df_tx = pd.DataFrame(client.open(SHEET_NAME).worksheet("거래내역").get_all_records())
         df_history = pd.DataFrame(client.open(SHEET_NAME).worksheet("일별기록").get_all_records())
@@ -198,7 +183,6 @@ df = df_raw.copy()
 df_history = df_history_raw.copy()
 df_pnl = df_pnl_raw.copy()
 
-# 🚀 개별 포트폴리오 자산 가격 패치 함수
 def fetch_single_price(ticker):
     try:
         if not ticker or not isinstance(ticker, str): return ticker, 0.0, 0.0
@@ -206,10 +190,7 @@ def fetch_single_price(ticker):
             code = ticker.split('.')[0]
             res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}", timeout=3)
             data = res.json()['datas'][0]
-            curr = float(data['closePrice'].replace(',', ''))
-            change_pct = float(data['fluctuationsRatio'])
-            return ticker, curr, change_pct
-
+            return ticker, float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d").dropna(subset=['Close'])
         if len(hist) >= 2: return ticker, float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
@@ -217,7 +198,6 @@ def fetch_single_price(ticker):
         return ticker, 0.0, 0.0
     except: return ticker, 0.0, 0.0
 
-# 🚀 멀티스레딩 병렬 처리로 내 자산 전체 가격을 한 번에 긁어옵니다.
 @st.cache_data(ttl=30)
 def get_all_market_data(tickers_tuple):
     results = {}
@@ -228,27 +208,41 @@ def get_all_market_data(tickers_tuple):
             results[ticker] = (price, change)
     return results
 
-@st.cache_data(ttl=86400) 
-def get_dividend_history(ticker):
+def fetch_single_dividend(ticker):
     try:
-        if not ticker or not isinstance(ticker, str): return pd.Series(dtype=float)
-        hist = yf.Ticker(ticker).history(period="2y")
-        if 'Dividends' in hist.columns: return hist[hist['Dividends'] > 0]['Dividends']
-    except: pass
-    return pd.Series(dtype=float)
+        if not ticker or not isinstance(ticker, str): return ticker, pd.Series(dtype=float), None
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="2y")
+        
+        # 🚀 [기능 4] 배당락일 캘린더 추출 로직 (야후 파이낸스)
+        ex_date = None
+        try: 
+            # yfinance 내부 dict를 안전하게 get
+            info = stock.info
+            if 'exDividendDate' in info and info['exDividendDate'] is not None:
+                ex_date = datetime.datetime.fromtimestamp(info['exDividendDate']).strftime('%Y-%m-%d')
+        except: pass
+        
+        divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
+        return ticker, divs, ex_date
+    except: return ticker, pd.Series(dtype=float), None
+
+@st.cache_data(ttl=86400) 
+def get_all_dividend_history(tickers_tuple):
+    results = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_single_dividend, t): t for t in tickers_tuple}
+        for future in as_completed(futures):
+            ticker, divs, ex_date = future.result()
+            results[ticker] = {"divs": divs, "ex_date": ex_date}
+    return results
 
 
-# =========================================================
-# 🌟 모바일 100% 원라인 보장 UI
-# =========================================================
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
 
-if "macro_selector" not in st.session_state:
-    st.session_state.macro_selector = load_macro_settings()
-
-def on_macro_change():
-    save_macro_settings(st.session_state.macro_selector)
+if "macro_selector" not in st.session_state: st.session_state.macro_selector = load_macro_settings()
+def on_macro_change(): save_macro_settings(st.session_state.macro_selector)
 
 with col_title:
     st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 5px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
@@ -256,102 +250,56 @@ with col_title:
 with col_setting:
     try:
         with st.popover("⚙️ 설정", use_container_width=True):
-            selected_indicators = st.multiselect(
-                "최대 9개 선택",
-                options=list(INDICATORS_CONFIG.keys()),
-                key="macro_selector",
-                max_selections=9,
-                on_change=on_macro_change,
-                label_visibility="collapsed"
-            )
+            st.multiselect("최대 9개 선택", options=list(INDICATORS_CONFIG.keys()), key="macro_selector", max_selections=9, on_change=on_macro_change, label_visibility="collapsed")
     except AttributeError:
         with st.expander("⚙️ 설정"):
-            selected_indicators = st.multiselect(
-                "최대 9개 선택",
-                options=list(INDICATORS_CONFIG.keys()),
-                key="macro_selector",
-                max_selections=9,
-                on_change=on_macro_change,
-                label_visibility="collapsed"
-            )
+            st.multiselect("최대 9개 선택", options=list(INDICATORS_CONFIG.keys()), key="macro_selector", max_selections=9, on_change=on_macro_change, label_visibility="collapsed")
 
-macro_data = {} 
-
-if not st.session_state.macro_selector:
-    st.caption("선택된 지표가 없습니다. 위의 설정 창을 열어 지표를 추가해 주세요.")
+if not st.session_state.macro_selector: st.caption("선택된 지표가 없습니다. 위의 설정 창을 열어 지표를 추가해 주세요.")
 else:
     macro_data = get_macro_indicators(tuple(st.session_state.macro_selector))
     html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; margin-bottom: 20px;">'
-
     for name in st.session_state.macro_selector:
         data = macro_data.get(name)
         info = INDICATORS_CONFIG[name]
-        prefix = info["prefix"]
-        suffix = info["suffix"]
+        prefix, suffix = info["prefix"], info["suffix"]
         
         if data is not None:
             curr, d_val, d_pct = data["current"], data["change_val"], data["change_pct"]
-            
-            if info["inverse"]:
-                if d_val > 0: color = profit_up_color 
-                elif d_val < 0: color = profit_down_color 
-                else: color = text_color
-            else:
-                if d_val > 0: color = profit_up_color 
-                elif d_val < 0: color = profit_down_color 
-                else: color = text_color
-            
-            if info["src"] == "naver_stock": format_str = ",.0f"
-            elif "비트코인" in name: format_str = ",.1f"
-            else: format_str = ",.2f"
-            
+            color = profit_up_color if (d_val > 0 and not info["inverse"]) or (d_val < 0 and info["inverse"]) else profit_down_color if d_val != 0 else text_color
+            format_str = ",.0f" if info["src"] == "naver_stock" else ",.1f" if "비트코인" in name else ",.2f"
             html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">'
             html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
             html_cards += f'<div style="font-size: 15px; font-weight: bold; color: {text_color}; margin-bottom: 2px;">{prefix}{curr:{format_str}}{suffix}</div>'
-            html_cards += f'<div style="font-size: 11px; font-weight: bold; color: {color};">{d_val:+,.2f} ({d_pct:+.2f}%)</div>'
-            html_cards += '</div>'
+            html_cards += f'<div style="font-size: 11px; font-weight: bold; color: {color};">{d_val:+,.2f} ({d_pct:+.2f}%)</div></div>'
         else:
-            html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; opacity: 0.6;">'
-            html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
-            html_cards += f'<div style="font-size: 13px; font-weight: bold; color: gray; margin-bottom: 2px;">데이터 지연</div>'
-            html_cards += '<div style="font-size: 11px; color: gray;">-</div>'
-            html_cards += '</div>'
-
+            html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; opacity: 0.6;"><div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div><div style="font-size: 13px; font-weight: bold; color: gray; margin-bottom: 2px;">데이터 지연</div><div style="font-size: 11px; color: gray;">-</div></div>'
     html_cards += '</div>'
     st.markdown(html_cards, unsafe_allow_html=True)
 st.markdown("---")
 
-
-# =========================================================
-# 🌟 포트폴리오 병렬 계산 로직
-# =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
 else:
-    required_cols = ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']
-    for col in required_cols:
+    for col in ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']:
         if col not in df.columns: df[col] = 0 if col in ['수량', '거래단가'] else ""
-
     df['수량'] = pd.to_numeric(df['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df['거래단가'] = pd.to_numeric(df['거래단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-
     df['계산용수량'] = df.apply(lambda x: x['수량'] if str(x['거래종류']).strip() == '매수' else -x['수량'], axis=1)
+    
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
     holdings = holdings[holdings['계산용수량'] > 0].copy()
-    
-    holdings['자산군'] = holdings['자산군'].replace('', '기타').fillna('기타')
+    holdings['자산군'] = holdings['자산군'].replace('', '주식').fillna('주식') # 기본값 주식
     holdings['종목명'] = holdings['종목명'].replace('', '알수없음').fillna('알수없음')
 
     buy_df = df[df['거래종류'] == '매수'].copy()
     buy_df['결제금액'] = buy_df['수량'] * buy_df['거래단가']
     avg_cost_df = buy_df.groupby(['종목명', '티커'])[['결제금액', '수량']].sum().reset_index()
-    
     avg_cost_df['평균매입단가'] = (avg_cost_df['결제금액'] / avg_cost_df['수량']).replace([np.inf, -np.inf], 0).fillna(0)
     
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    # 🚀 멀티스레딩으로 내 자산과 환율 데이터를 한꺼번에 긁어옵니다.
     unique_tickers = list(holdings['티커'].unique())
     if "KRW=X" not in unique_tickers: unique_tickers.append("KRW=X")
     market_data_dict = get_all_market_data(tuple(unique_tickers))
@@ -384,98 +332,47 @@ else:
 
     st.metric(label="💰 총 자산 (원)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
 
-    t_sell_krw, t_sell_usd_val, t_sell_usd_krw = 0, 0.0, 0
-    t_div_krw, t_div_usd_val, t_div_usd_krw = 0, 0.0, 0
-    total_realized_krw = 0
-
-    if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
-        if '분류' not in df_pnl.columns: df_pnl['분류'] = ''
-        if '통화' not in df_pnl.columns: df_pnl['통화'] = ''
-        if '실현손익(달러)' not in df_pnl.columns: df_pnl['실현손익(달러)'] = 0.0
+    # 🚀 [기능 5] 자산 리밸런싱 계산기 데이터 구성
+    if total_target == 100 and total_asset > 0:
+        asset_classes = {"주식": 0.0, "코인": 0.0, "채권": 0.0, "현금": 0.0}
+        for _, row in holdings.iterrows():
+            ac = row['자산군']
+            if ac in asset_classes: asset_classes[ac] += row['평가액(원)']
+            else: asset_classes["기타"] = asset_classes.get("기타", 0.0) + row['평가액(원)']
         
-        df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
-        df_pnl['실현손익(달러)'] = pd.to_numeric(df_pnl['실현손익(달러)'], errors='coerce').fillna(0)
-        df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x['분류']).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
-        
-        currency_map = df.drop_duplicates('티커').set_index('티커')['통화'].to_dict()
-        df_pnl['통화'] = df_pnl.apply(lambda x: x['통화'] if str(x['통화']).strip() != '' else currency_map.get(x['티커'], 'KRW'), axis=1)
-        
-        def calculate_today_krw(row):
-            krw, usd, curr = row['실현손익(원)'], row['실현손익(달러)'], row['통화']
-            if curr == 'USD':
-                if usd == 0 and krw != 0: usd = krw / 1450.0  
-                return usd, usd * usd_krw_price
-            return 0.0, krw
-
-        df_pnl[['실현손익(외화)', '현재환율적용_실현손익(원)']] = df_pnl.apply(lambda row: pd.Series(calculate_today_krw(row)), axis=1)
-        df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'국내' if x['통화']=='KRW' else '해외'})", axis=1)
-        df_pnl['실현손익_차트용(만원)'] = (df_pnl['현재환율적용_실현손익(원)'] / 10000).fillna(0).astype(int)
-        
-        df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'], errors='coerce')
-        df_pnl = df_pnl.dropna(subset=['날짜']).copy() 
-        df_pnl['일자'] = df_pnl['날짜'].dt.strftime('%m-%d')
-        df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
-        df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
-
-        t_sell_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'KRW')]['현재환율적용_실현손익(원)'].sum()
-        t_sell_usd_val = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'USD')]['실현손익(외화)'].sum()
-        t_sell_usd_krw = df_pnl[(df_pnl['분류'] == '매도') & (df_pnl['통화'] == 'USD')]['현재환율적용_실현손익(원)'].sum()
-        
-        t_div_krw = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'KRW')]['현재환율적용_실현손익(원)'].sum()
-        t_div_usd_val = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'USD')]['실현손익(외화)'].sum()
-        t_div_usd_krw = df_pnl[(df_pnl['분류'] == '배당') & (df_pnl['통화'] == 'USD')]['현재환율적용_실현손익(원)'].sum()
-        
-        total_realized_krw = t_sell_krw + t_sell_usd_krw + t_div_krw + t_div_usd_krw
-
-    st.markdown("**💸 실현 손익 및 배당금 요약** <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
-    
-    summary_data = {
-        "손익": ["💡 총계", "📉 매도", "🎁 배당"],
-        "합계 (환산)": [f"{int(total_realized_krw):,.0f}", f"{int(t_sell_krw + t_sell_usd_krw):,.0f}", f"{int(t_div_krw + t_div_usd_krw):,.0f}"],
-        "국내 (원)": [f"{int(t_sell_krw + t_div_krw):,.0f}", f"{int(t_sell_krw):,.0f}", f"{int(t_div_krw):,.0f}"],
-        "해외 (달러)": [f"${t_sell_usd_val + t_div_usd_val:,.2f}", f"${t_sell_usd_val:,.2f}", f"${t_div_usd_val:,.2f}"]
-    }
-    df_summary = pd.DataFrame(summary_data)
-    
-    def style_summary(x):
-        styles = pd.DataFrame('', index=x.index, columns=x.columns)
-        styles['손익'] = 'font-weight: bold;'     
-        styles.loc[0, '합계 (환산)'] = f'color: {gold_highlight};'
-        return styles
-
-    st.dataframe(
-        df_summary.style
-        .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '15px', 'text-align': 'center'})
-        .apply(style_summary, axis=None),
-        use_container_width=True, hide_index=True
-    )
+        rebal_data = []
+        target_dict = {"주식": target_stock, "코인": target_crypto, "채권": target_bond, "현금": target_cash}
+        for ac, target_pct in target_dict.items():
+            curr_val = asset_classes.get(ac, 0.0)
+            curr_pct = (curr_val / total_asset) * 100
+            target_val = total_asset * (target_pct / 100)
+            diff_val = target_val - curr_val
+            action = "🟢 매수" if diff_val > 0 else "🔴 매도" if diff_val < 0 else "유지"
+            if diff_val == 0: action_val = 0.0
+            else: action_val = abs(diff_val)
+            rebal_data.append({"자산군": ac, "현재 비중": curr_pct, "목표 비중": target_pct, "현재액(원)": curr_val, "목표액(원)": target_val, "Action": action, "필요 금액(원)": action_val})
+        rebal_df = pd.DataFrame(rebal_data)
 
     st.markdown("---")
 
     st.markdown("**📊 포트폴리오 시각화**")
-    tab_chart1, tab_chart2, tab_chart3 = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익"])
+    tab_chart1, tab_chart2, tab_chart3, tab_rebal = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익", "⚖️ 리밸런싱 계산기"])
 
     with tab_chart1:
         pc1, pc2 = st.columns(2)
         text_font_setting = dict(color='black', size=20, family="sans-serif")
-        
         with pc1:
-            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 자산군별 비중 ]</div>", unsafe_allow_html=True)
             fig1 = px.pie(holdings.groupby('자산군')['평가액(만원)'].sum().reset_index(), values='평가액(만원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
             fig1.update_traces(textposition='inside', texttemplate='<b>%{label}</b><br><b>%{percent:.1%}</b>', textfont=text_font_setting)
             fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
             st.plotly_chart(fig1, use_container_width=True)
-            
         with pc2:
-            st.markdown("<div style='text-align: center; font-size: 13px; color: gray;'>[ 🌟 심층 썬버스트 차트 ]</div>", unsafe_allow_html=True)
             holdings_positive = holdings[holdings['평가액(만원)'] > 0].copy()
             if not holdings_positive.empty:
                 fig_sun = px.sunburst(holdings_positive, path=['자산군', '종목명'], values='평가액(만원)', color_discrete_sequence=pastel_colors)
                 fig_sun.update_traces(textinfo='label+percent entry', textfont=dict(color='black', size=15))
                 fig_sun.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
                 st.plotly_chart(fig_sun, use_container_width=True)
-            else:
-                st.caption("표시할 양수(+) 자산이 없습니다.")
 
     with tab_chart2:
         if not df_history.empty and df_history.shape[1] >= 2:
@@ -484,30 +381,55 @@ else:
             fig_line.update_traces(line_color=line_color, marker_color=line_color)
             fig_line.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
             st.plotly_chart(fig_line, use_container_width=True)
-        else:
-            st.caption("아직 데이터가 부족하여 차트를 그릴 수 없습니다.")
 
     with tab_chart3:
         if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
+            df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
+            df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x.get('분류', '')).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
+            df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'해외' if x.get('통화')=='USD' else '국내'})", axis=1)
+            df_pnl['실현손익_차트용(만원)'] = (df_pnl['실현손익(원)'] / 10000).fillna(0).astype(int)
+            
             period = st.radio("보기 옵션", ["월별", "연별", "일별"], horizontal=True, label_visibility="collapsed")
+            df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'], errors='coerce')
+            df_pnl = df_pnl.dropna(subset=['날짜'])
+            df_pnl['일자'], df_pnl['월'], df_pnl['연'] = df_pnl['날짜'].dt.strftime('%m-%d'), df_pnl['날짜'].dt.strftime('%Y-%m'), df_pnl['날짜'].dt.strftime('%Y')
             
             def plot_pnl_bar(data, x_col):
                 color_map = {'매도 (국내)': '#FF6B6B', '매도 (해외)': '#FFA07A', '배당 (국내)': '#4DABF7', '배당 (해외)': '#51CF66'}
                 fig = px.bar(data, x=x_col, y='실현손익_차트용(만원)', color='차트분류', text='실현손익_차트용(만원)', color_discrete_map=color_map)
-                fig.update_traces(texttemplate='%{text:,.0f}', textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
+                fig.update_traces(texttemplate='%{text:,.0f}', textposition="outside", cliponaxis=False)
                 fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
                 st.plotly_chart(fig, use_container_width=True)
 
             if period == "월별": plot_pnl_bar(df_pnl.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '월')
             elif period == "연별": plot_pnl_bar(df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '연')
             else: plot_pnl_bar(df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '일자')
+    
+    # 🚀 [기능 5] 리밸런싱 계산기 렌더링
+    with tab_rebal:
+        if total_target == 100 and total_asset > 0:
+            st.markdown("<div style='font-size: 13px; color: gray; margin-bottom: 10px;'>💡 사이드바에서 설정한 목표 비중으로 맞추기 위한 매매 지침입니다.</div>", unsafe_allow_html=True)
+            
+            def style_rebal(val):
+                if isinstance(val, str):
+                    if "매수" in val: return f'color: {profit_up_color}; font-weight: bold;'
+                    elif "매도" in val: return f'color: {profit_down_color}; font-weight: bold;'
+                return ''
+                
+            st.dataframe(
+                rebal_df.style
+                .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px', 'text-align': 'center'})
+                .format({'현재 비중': '{:.1f}%', '목표 비중': '{:.1f}%', '현재액(원)': '{:,.0f}', '목표액(원)': '{:,.0f}', '필요 금액(원)': '{:,.0f}'})
+                .map(style_rebal, subset=['Action']),
+                use_container_width=True, hide_index=True
+            )
         else:
-            st.caption("아직 매도/배당 기록이 없습니다.")
+            st.caption("좌측 ⚙️ 사이드바를 열어 목표 자산 비중의 합을 100%로 맞춰주세요.")
 
     st.markdown("---")
 
     st.markdown("**📋 상세 데이터**")
-    tab_data1, tab_data2, tab_data3 = st.tabs(["📊 자산 상세", "🧾 실현 손익", "🔮 향후 6개월 배당 예측"])
+    tab_data1, tab_data3 = st.tabs(["📊 자산 상세", "🔮 향후 6개월 배당 & 이벤트"])
 
     with tab_data1:
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
@@ -526,56 +448,33 @@ else:
             .map(style_table, subset=['수익률', '손익']),
             use_container_width=True, hide_index=True
         )
-
-    with tab_data2:
-        if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
-            display_pnl = df_pnl[['날짜', '차트분류', '종목명', '통화', '실현손익(외화)', '현재환율적용_실현손익(원)']].copy()
-            display_pnl['날짜'] = display_pnl['날짜'].dt.strftime('%m-%d')
-            display_pnl.sort_values('날짜', ascending=False, inplace=True)
-            
-            display_pnl['달러수익'] = display_pnl.apply(lambda x: f"${x['실현손익(외화)']:,.2f}" if x['통화'] == 'USD' else "-", axis=1)
-            display_pnl.rename(columns={'현재환율적용_실현손익(원)': '환산수익(원)'}, inplace=True)
-            display_pnl = display_pnl[['날짜', '차트분류', '종목명', '달러수익', '환산수익(원)']]
-            
-            def style_pnl(val):
-                if isinstance(val, (int, float)):
-                    color = profit_up_color if val > 0 else profit_down_color if val < 0 else text_color
-                    return f'color: {color}; font-weight: bold;'
-                return ''
-                
-            st.dataframe(
-                display_pnl.style
-                .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px'})
-                .format({'환산수익(원)': '{:,.0f}'})
-                .map(style_pnl, subset=['환산수익(원)']),
-                use_container_width=True, hide_index=True
-            )
-        else:
-            st.caption("표시할 데이터가 없습니다.")
             
     with tab_data3:
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.datetime.now(kst)
-        next_6_months = []
-        for i in range(1, 7):
-            m = now.month + i
-            y = now.year + (m - 1) // 12
-            m = (m - 1) % 12 + 1
-            next_6_months.append((y, m))
+        next_6_months = [(now.year + (now.month + i - 1) // 12, (now.month + i - 1) % 12 + 1) for i in range(1, 7)]
             
         expected_records = []
+        calendar_records = []
         total_6_months_krw = 0.0
         
-        with st.spinner("과거 2년치 배당 이력을 스캔하여 향후 6개월의 현금흐름을 예측 중입니다..."):
+        with st.spinner("과거 2년치 배당 이력을 스캔 및 이벤트 캘린더를 동기화 중입니다..."):
+            unique_tickers_for_div = tuple(holdings['티커'].unique())
+            all_div_history = get_all_dividend_history(unique_tickers_for_div)
+
             for _, row in holdings.iterrows():
                 ticker = row['티커']
                 name = row['종목명']
                 qty = row['계산용수량']
                 curr = row['통화']
                 
-                divs = get_dividend_history(ticker)
-                if divs.empty: continue
+                div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
+                divs = div_info["divs"]
+                ex_date = div_info["ex_date"]
                 
+                if ex_date: calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 최근/예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
+                
+                if divs.empty: continue
                 is_monthly = len(divs) >= 18
                 
                 for y, m in next_6_months:
@@ -590,44 +489,22 @@ else:
                         rate = usd_krw_price if curr == 'USD' else 1.0
                         expected_krw = expected_div * rate
                         total_6_months_krw += expected_krw
-                        
-                        expected_records.append({
-                            '연월': f"{y}년 {m:02d}월",
-                            '월': m,
-                            '종목명': name,
-                            '수량': qty, 
-                            '통화': curr,
-                            '예상 주당배당금': dps,
-                            '예상 배당금': expected_div,
-                            '환산 예상금액(원)': expected_krw
-                        })
+                        expected_records.append({'연월': f"{y}년 {m:02d}월", '종목명': name, '수량': qty, '통화': curr, '예상 주당배당금': dps, '예상 배당금': expected_div, '환산 예상금액(원)': expected_krw})
         
+        # 🚀 [기능 4] 배당 캘린더 렌더링
+        if calendar_records:
+            st.markdown("**📅 [New] 주요 종목 이벤트 캘린더**")
+            cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=False)
+            st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
+            st.markdown("---")
+
         if expected_records:
             next_div_df = pd.DataFrame(expected_records)
             st.markdown(f"**📈 향후 6개월 누적 예상 배당금:** 약 {int(total_6_months_krw):,.0f} 원 <span style='font-size:12px; color:gray;'>(오늘 환율 적용)</span>", unsafe_allow_html=True)
-            
-            fig_next = px.bar(next_div_df, x='연월', y='환산 예상금액(원)', color='종목명', 
-                              hover_data={'예상 배당금': ':.2f', '통화': True},
-                              color_discrete_sequence=pastel_colors)
+            fig_next = px.bar(next_div_df, x='연월', y='환산 예상금액(원)', color='종목명', hover_data={'예상 배당금': ':.2f', '통화': True}, color_discrete_sequence=pastel_colors)
             fig_next.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=10, l=10, r=10), barmode='stack')
             st.plotly_chart(fig_next, use_container_width=True)
-            
-            st.markdown("**🧾 향후 6개월 종목별 세부 배당 캘린더**")
-            display_next = next_div_df.copy()
-            display_next['예상 배당금'] = display_next.apply(lambda x: f"${x['예상 배당금']:,.2f}" if x['통화']=='USD' else f"{x['예상 배당금']:,.0f}원", axis=1)
-            display_next['주당 배당금'] = display_next.apply(lambda x: f"${x['예상 주당배당금']:,.2f}" if x['통화']=='USD' else f"{x['예상 주당배당금']:,.0f}원", axis=1)
-            
-            display_next.sort_values(by=['연월', '환산 예상금액(원)'], ascending=[True, False], inplace=True)
-            
-            st.dataframe(
-                display_next[['연월', '종목명', '수량', '주당 배당금', '예상 배당금', '환산 예상금액(원)']].style
-                .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'})
-                .format({'수량': '{:,.1f}', '환산 예상금액(원)': '{:,.0f}원'}),
-                use_container_width=True, hide_index=True
-            )
             st.caption("※ 과거 2년 치 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
-        else:
-            st.caption("보유 종목 중 향후 6개월 내에 배당이 확실하게 예정된 종목이 없습니다.")
 
 if auto_refresh:
     time.sleep(30)
