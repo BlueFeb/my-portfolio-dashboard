@@ -21,17 +21,21 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
-# 🚀 [기능 5] 리밸런싱을 위한 사이드바 목표 비중 슬라이더 추가
+# 🚀 [업데이트] 리밸런싱을 위한 사이드바 목표 비중 입력 (숫자형 + 자동 계산)
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
-target_stock = st.sidebar.slider("주식 비중", 0, 100, 60)
-target_crypto = st.sidebar.slider("코인 비중", 0, 100, 10)
-target_bond = st.sidebar.slider("채권 비중", 0, 100, 20)
-target_cash = st.sidebar.slider("현금 비중", 0, 100, 10)
+target_stock = st.sidebar.number_input("📈 주식 비중 (%)", min_value=0, max_value=100, value=50, step=1)
+target_crypto = st.sidebar.number_input("🪙 코인 비중 (%)", min_value=0, max_value=100, value=10, step=1)
+target_commodity = st.sidebar.number_input("🛢️ 원자재 비중 (%)", min_value=0, max_value=100, value=10, step=1)
+target_bond = st.sidebar.number_input("📉 채권 비중 (%)", min_value=0, max_value=100, value=20, step=1)
 
-total_target = target_stock + target_crypto + target_bond + target_cash
-if total_target != 100:
-    st.sidebar.error(f"⚠️ 목표 비중의 합이 100%가 아닙니다. (현재: {total_target}%)")
+# 무조건 100%가 되도록 마지막 '현금' 비중 자동 계산
+target_cash = 100 - (target_stock + target_crypto + target_commodity + target_bond)
+
+if target_cash < 0:
+    st.sidebar.error(f"⚠️ 합계가 100%를 초과했습니다! (현재: 초과 {abs(target_cash)}%)")
+else:
+    st.sidebar.info(f"💵 현금 비중: {target_cash}%\n(무조건 100%가 되도록 자동 계산됨)")
 
 st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 
@@ -58,6 +62,11 @@ st.markdown(f"""
     <style>
     .stApp {{ background-color: {bg_color}; }}
     .stApp, .stApp p, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, .stApp label, .stApp span {{
+        color: {text_color} !important;
+    }}
+    /* 🚨 [버그 픽스] 사이드바 다크모드 글씨 묻힘 현상 해결 */
+    [data-testid="stSidebar"] {{ background-color: {bg_color} !important; border-right: 1px solid {border_color}; }}
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label, [data-testid="stSidebar"] div {{
         color: {text_color} !important;
     }}
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
@@ -213,16 +222,12 @@ def fetch_single_dividend(ticker):
         if not ticker or not isinstance(ticker, str): return ticker, pd.Series(dtype=float), None
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
-        
-        # 🚀 [기능 4] 배당락일 캘린더 추출 로직 (야후 파이낸스)
         ex_date = None
         try: 
-            # yfinance 내부 dict를 안전하게 get
             info = stock.info
             if 'exDividendDate' in info and info['exDividendDate'] is not None:
                 ex_date = datetime.datetime.fromtimestamp(info['exDividendDate']).strftime('%Y-%m-%d')
         except: pass
-        
         divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
         return ticker, divs, ex_date
     except: return ticker, pd.Series(dtype=float), None
@@ -236,7 +241,6 @@ def get_all_dividend_history(tickers_tuple):
             ticker, divs, ex_date = future.result()
             results[ticker] = {"divs": divs, "ex_date": ex_date}
     return results
-
 
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
@@ -289,7 +293,7 @@ else:
     
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
     holdings = holdings[holdings['계산용수량'] > 0].copy()
-    holdings['자산군'] = holdings['자산군'].replace('', '주식').fillna('주식') # 기본값 주식
+    holdings['자산군'] = holdings['자산군'].replace('', '주식').fillna('주식') 
     holdings['종목명'] = holdings['종목명'].replace('', '알수없음').fillna('알수없음')
 
     buy_df = df[df['거래종류'] == '매수'].copy()
@@ -332,24 +336,23 @@ else:
 
     st.metric(label="💰 총 자산 (원)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
 
-    # 🚀 [기능 5] 자산 리밸런싱 계산기 데이터 구성
-    if total_target == 100 and total_asset > 0:
-        asset_classes = {"주식": 0.0, "코인": 0.0, "채권": 0.0, "현금": 0.0}
+    # 🚀 [업데이트] 리밸런싱 계산기: 5대 자산군 매핑
+    if target_cash >= 0 and total_asset > 0:
+        asset_classes = {"주식": 0.0, "코인": 0.0, "원자재": 0.0, "채권": 0.0, "현금": 0.0}
         for _, row in holdings.iterrows():
             ac = row['자산군']
             if ac in asset_classes: asset_classes[ac] += row['평가액(원)']
             else: asset_classes["기타"] = asset_classes.get("기타", 0.0) + row['평가액(원)']
         
         rebal_data = []
-        target_dict = {"주식": target_stock, "코인": target_crypto, "채권": target_bond, "현금": target_cash}
+        target_dict = {"주식": target_stock, "코인": target_crypto, "원자재": target_commodity, "채권": target_bond, "현금": target_cash}
         for ac, target_pct in target_dict.items():
             curr_val = asset_classes.get(ac, 0.0)
-            curr_pct = (curr_val / total_asset) * 100
+            curr_pct = (curr_val / total_asset) * 100 if total_asset > 0 else 0
             target_val = total_asset * (target_pct / 100)
             diff_val = target_val - curr_val
             action = "🟢 매수" if diff_val > 0 else "🔴 매도" if diff_val < 0 else "유지"
-            if diff_val == 0: action_val = 0.0
-            else: action_val = abs(diff_val)
+            action_val = abs(diff_val) if diff_val != 0 else 0.0
             rebal_data.append({"자산군": ac, "현재 비중": curr_pct, "목표 비중": target_pct, "현재액(원)": curr_val, "목표액(원)": target_val, "Action": action, "필요 금액(원)": action_val})
         rebal_df = pd.DataFrame(rebal_data)
 
@@ -405,9 +408,8 @@ else:
             elif period == "연별": plot_pnl_bar(df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '연')
             else: plot_pnl_bar(df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '일자')
     
-    # 🚀 [기능 5] 리밸런싱 계산기 렌더링
     with tab_rebal:
-        if total_target == 100 and total_asset > 0:
+        if target_cash >= 0 and total_asset > 0:
             st.markdown("<div style='font-size: 13px; color: gray; margin-bottom: 10px;'>💡 사이드바에서 설정한 목표 비중으로 맞추기 위한 매매 지침입니다.</div>", unsafe_allow_html=True)
             
             def style_rebal(val):
@@ -424,7 +426,7 @@ else:
                 use_container_width=True, hide_index=True
             )
         else:
-            st.caption("좌측 ⚙️ 사이드바를 열어 목표 자산 비중의 합을 100%로 맞춰주세요.")
+            st.caption("좌측 ⚙️ 사이드바를 열어 목표 자산 비중 수치를 올바르게 입력해 주세요.")
 
     st.markdown("---")
 
@@ -454,8 +456,7 @@ else:
         now = datetime.datetime.now(kst)
         next_6_months = [(now.year + (now.month + i - 1) // 12, (now.month + i - 1) % 12 + 1) for i in range(1, 7)]
             
-        expected_records = []
-        calendar_records = []
+        expected_records, calendar_records = [], []
         total_6_months_krw = 0.0
         
         with st.spinner("과거 2년치 배당 이력을 스캔 및 이벤트 캘린더를 동기화 중입니다..."):
@@ -463,14 +464,9 @@ else:
             all_div_history = get_all_dividend_history(unique_tickers_for_div)
 
             for _, row in holdings.iterrows():
-                ticker = row['티커']
-                name = row['종목명']
-                qty = row['계산용수량']
-                curr = row['통화']
-                
+                ticker, name, qty, curr = row['티커'], row['종목명'], row['계산용수량'], row['통화']
                 div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
-                divs = div_info["divs"]
-                ex_date = div_info["ex_date"]
+                divs, ex_date = div_info["divs"], div_info["ex_date"]
                 
                 if ex_date: calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 최근/예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
                 
@@ -491,7 +487,6 @@ else:
                         total_6_months_krw += expected_krw
                         expected_records.append({'연월': f"{y}년 {m:02d}월", '종목명': name, '수량': qty, '통화': curr, '예상 주당배당금': dps, '예상 배당금': expected_div, '환산 예상금액(원)': expected_krw})
         
-        # 🚀 [기능 4] 배당 캘린더 렌더링
         if calendar_records:
             st.markdown("**📅 [New] 주요 종목 이벤트 캘린더**")
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=False)
