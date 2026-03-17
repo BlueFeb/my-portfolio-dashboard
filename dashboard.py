@@ -12,11 +12,11 @@ import requests
 import re
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
-# 🌟 사이드바: 다크모드 및 실시간 새로고침 스위치
 is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
@@ -71,8 +71,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# --- 2. 다이내믹 매크로 지표 관리 (네이버 실시간 API 융합) ---
-# src 값을 지정하여 한국장은 네이버, 미국장은 야후에서 가져오도록 라우팅 처리
+# --- 2. 다이내믹 매크로 지표 관리 ---
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
@@ -113,68 +112,69 @@ def save_macro_settings(selected):
             json.dump({"indicators": selected}, f)
     except: pass
 
+# 🚀 개별 매크로 지표 패치 함수 (멀티스레딩용)
+def fetch_single_macro(name, info):
+    try:
+        if info["src"] == "naver_index":
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
+            data = res.json()['datas'][0]
+            curr = float(data['closePrice'].replace(',', ''))
+            change_pct = float(data['fluctuationsRatio'])
+            change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
+            if change_pct < 0: change_val = -change_val
+            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+        
+        elif info["src"] == "naver_stock":
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
+            data = res.json()['datas'][0]
+            curr = float(data['closePrice'].replace(',', ''))
+            change_pct = float(data['fluctuationsRatio'])
+            change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
+            if change_pct < 0: change_val = -change_val
+            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+
+        elif info["src"] == "naver_vkospi":
+            res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
+            if curr_match:
+                curr = float(curr_match.group(1))
+                chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
+                change_val = float(chg_match.group(1)) if chg_match else 0.0
+                if "nv01" in res.text: change_val = -change_val
+                prev = curr - change_val
+                return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
+            return name, None
+        
+        elif info["src"] == "yahoo":
+            # 🚀 period를 1mo -> 5d로 대폭 단축하여 통신 속도 극대화
+            stock = yf.Ticker(info["ticker"])
+            hist = stock.history(period="5d").dropna(subset=['Close'])
+            if len(hist) >= 2:
+                curr = float(hist['Close'].iloc[-1])
+                prev = float(hist['Close'].iloc[-2])
+                if info["ticker"] == "JPYKRW=X":
+                    curr *= 100; prev *= 100
+                change_val = curr - prev
+                change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            return name, None
+    except: return name, None
+
+# 🚀 멀티스레딩 병렬 처리로 모든 지표를 동시에 1초 만에 긁어옵니다.
 @st.cache_data(ttl=30) 
 def get_macro_indicators(selected_names_tuple):
     results = {}
     if not selected_names_tuple: return results
-    for name in selected_names_tuple:
-        info = INDICATORS_CONFIG.get(name)
-        if not info: continue
-        
-        try:
-            # 🚨 1. 네이버 실시간 지수 (코스피/코스닥 0초 딜레이 파싱)
-            if info["src"] == "naver_index":
-                res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
-                data = res.json()['datas'][0]
-                curr = float(data['closePrice'].replace(',', ''))
-                change_pct = float(data['fluctuationsRatio'])
-                change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
-                if change_pct < 0: change_val = -change_val # 하락 시 음수 처리
-                results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
-            
-            # 🚨 2. 네이버 실시간 주식 (삼성전자/하이닉스 0초 딜레이 파싱)
-            elif info["src"] == "naver_stock":
-                res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
-                data = res.json()['datas'][0]
-                curr = float(data['closePrice'].replace(',', ''))
-                change_pct = float(data['fluctuationsRatio'])
-                change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
-                if change_pct < 0: change_val = -change_val
-                results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
-
-            # 🚨 3. 네이버 VKOSPI (HTML 강제 스크래핑)
-            elif info["src"] == "naver_vkospi":
-                res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-                curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
-                if curr_match:
-                    curr = float(curr_match.group(1))
-                    chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
-                    change_val = float(chg_match.group(1)) if chg_match else 0.0
-                    if "nv01" in res.text: change_val = -change_val
-                    prev = curr - change_val
-                    results[name] = {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
-                else: results[name] = None
-            
-            # 🚨 4. 야후 파이낸스 (글로벌 매크로)
-            elif info["src"] == "yahoo":
-                stock = yf.Ticker(info["ticker"])
-                hist = stock.history(period="1mo").dropna(subset=['Close'])
-                if len(hist) >= 2:
-                    curr = float(hist['Close'].iloc[-1])
-                    prev = float(hist['Close'].iloc[-2])
-                    if info["ticker"] == "JPYKRW=X":
-                        curr *= 100; prev *= 100
-                    change_val = curr - prev
-                    change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
-                    results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
-                else: results[name] = None
-
-        except Exception as e:
-            print(f"Error fetching {name}: {e}")
-            results[name] = None
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_single_macro, name, INDICATORS_CONFIG[name]): name for name in selected_names_tuple}
+        for future in as_completed(futures):
+            name, res = future.result()
+            results[name] = res
     return results
 
-# --- 3. 데이터 로드 및 1차 무결점 정제 ---
+
+# --- 3. 데이터 로드 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -198,28 +198,35 @@ df = df_raw.copy()
 df_history = df_history_raw.copy()
 df_pnl = df_pnl_raw.copy()
 
-# 🚨 내 포트폴리오의 한국 주식도 지연 없이 네이버 API로 가져옵니다!
-@st.cache_data(ttl=30)
-def get_market_data(ticker):
+# 🚀 개별 포트폴리오 자산 가격 패치 함수
+def fetch_single_price(ticker):
     try:
-        if not ticker or not isinstance(ticker, str): return 0.0, 0.0
-        
-        # 한국 주식(.KS, .KQ)은 네이버 0초 딜레이 엔진으로 우회
+        if not ticker or not isinstance(ticker, str): return ticker, 0.0, 0.0
         if ticker.endswith('.KS') or ticker.endswith('.KQ'):
             code = ticker.split('.')[0]
             res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}", timeout=3)
             data = res.json()['datas'][0]
             curr = float(data['closePrice'].replace(',', ''))
             change_pct = float(data['fluctuationsRatio'])
-            return curr, change_pct
+            return ticker, curr, change_pct
 
-        # 해외 주식 및 환율은 야후 엔진 사용
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d").dropna(subset=['Close'])
-        if len(hist) >= 2: return float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
-        elif len(hist) == 1: return float(hist['Close'].iloc[0]), 0.0
-        return 0.0, 0.0
-    except: return 0.0, 0.0
+        if len(hist) >= 2: return ticker, float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
+        elif len(hist) == 1: return ticker, float(hist['Close'].iloc[0]), 0.0
+        return ticker, 0.0, 0.0
+    except: return ticker, 0.0, 0.0
+
+# 🚀 멀티스레딩 병렬 처리로 내 자산 전체 가격을 한 번에 긁어옵니다.
+@st.cache_data(ttl=30)
+def get_all_market_data(tickers_tuple):
+    results = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch_single_price, t): t for t in tickers_tuple}
+        for future in as_completed(futures):
+            ticker, price, change = future.result()
+            results[ticker] = (price, change)
+    return results
 
 @st.cache_data(ttl=86400) 
 def get_dividend_history(ticker):
@@ -294,7 +301,6 @@ else:
                 elif d_val < 0: color = profit_down_color 
                 else: color = text_color
             
-            # 주식 가격은 소수점 없이, 나머지는 지표별 맞춤 포맷
             if info["src"] == "naver_stock": format_str = ",.0f"
             elif "비트코인" in name: format_str = ",.1f"
             else: format_str = ",.2f"
@@ -317,7 +323,7 @@ st.markdown("---")
 
 
 # =========================================================
-# 🌟 포트폴리오 계산 로직 (에러 완벽 차단)
+# 🌟 포트폴리오 병렬 계산 로직
 # =========================================================
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
@@ -345,13 +351,17 @@ else:
     holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
     holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
 
-    usd_krw_price, _ = get_market_data("KRW=X")
-    if usd_krw_price <= 0.0: 
-        usd_krw_price = 1450.0
+    # 🚀 멀티스레딩으로 내 자산과 환율 데이터를 한꺼번에 긁어옵니다.
+    unique_tickers = list(holdings['티커'].unique())
+    if "KRW=X" not in unique_tickers: unique_tickers.append("KRW=X")
+    market_data_dict = get_all_market_data(tuple(unique_tickers))
+
+    usd_krw_price = market_data_dict.get("KRW=X", (1450.0, 0.0))[0]
+    if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
     for index, row in holdings.iterrows():
-        current_price, _ = get_market_data(row['티커'])
+        current_price, _ = market_data_dict.get(row['티커'], (0.0, 0.0))
         realtime_prices.append(current_price)
         rate = usd_krw_price if row['통화'] == "USD" else 1
         eval_krw = current_price * row['계산용수량'] * rate 
@@ -619,7 +629,6 @@ else:
         else:
             st.caption("보유 종목 중 향후 6개월 내에 배당이 확실하게 예정된 종목이 없습니다.")
 
-# 🚨 마지막 줄: 실시간 자동 새로고침(Auto Refresh) 무한 루프 엔진
 if auto_refresh:
     time.sleep(30)
     st.rerun()
