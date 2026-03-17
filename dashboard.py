@@ -71,31 +71,32 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# --- 2. 다이내믹 매크로 지표 관리 ---
-# 🚨 삼성전자와 SK하이닉스 추가 완료!
+# --- 2. 다이내믹 매크로 지표 관리 (네이버 실시간 API 융합) ---
+# src 값을 지정하여 한국장은 네이버, 미국장은 야후에서 가져오도록 라우팅 처리
 INDICATORS_CONFIG = {
-    "🇰🇷 코스피": {"ticker": "^KS11", "prefix": "", "suffix": "", "inverse": False},
-    "🇰🇷 코스닥": {"ticker": "^KQ11", "prefix": "", "suffix": "", "inverse": False},
-    "🇰🇷 삼성전자": {"ticker": "005930.KS", "prefix": "", "suffix": "원", "inverse": False},
-    "🇰🇷 SK하이닉스": {"ticker": "000660.KS", "prefix": "", "suffix": "원", "inverse": False},
-    "🇺🇸 S&P 500 선물": {"ticker": "ES=F", "prefix": "", "suffix": "", "inverse": False},
-    "🇺🇸 나스닥 선물": {"ticker": "NQ=F", "prefix": "", "suffix": "", "inverse": False},
-    "🇺🇸 다우존스 선물": {"ticker": "YM=F", "prefix": "", "suffix": "", "inverse": False},
-    "💾 반도체 (SOX)": {"ticker": "^SOX", "prefix": "", "suffix": "", "inverse": False},
-    "💱 원/달러": {"ticker": "KRW=X", "prefix": "", "suffix": "원", "inverse": False},
-    "💱 원/엔 (100엔)": {"ticker": "JPYKRW=X", "prefix": "", "suffix": "원", "inverse": False},
-    "💎 비트코인": {"ticker": "BTC-USD", "prefix": "$", "suffix": "", "inverse": False},
-    "💎 이더리움": {"ticker": "ETH-USD", "prefix": "$", "suffix": "", "inverse": False},
-    "🛢️ WTI 원유": {"ticker": "CL=F", "prefix": "$", "suffix": "", "inverse": False},
-    "🥇 금 선물": {"ticker": "GC=F", "prefix": "$", "suffix": "", "inverse": False},
-    "📈 10년물 국채 금리": {"ticker": "^TNX", "prefix": "", "suffix": "%", "inverse": True}, 
-    "🥶 미국 VIX": {"ticker": "^VIX", "prefix": "", "suffix": "", "inverse": True},       
+    "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
+    "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
+    "🇰🇷 삼성전자": {"ticker": "005930", "src": "naver_stock", "prefix": "", "suffix": "원", "inverse": False},
+    "🇰🇷 SK하이닉스": {"ticker": "000660", "src": "naver_stock", "prefix": "", "suffix": "원", "inverse": False},
+    "🇺🇸 S&P 500 선물": {"ticker": "ES=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
+    "🇺🇸 나스닥 선물": {"ticker": "NQ=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
+    "🇺🇸 다우존스 선물": {"ticker": "YM=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
+    "💾 반도체 (SOX)": {"ticker": "^SOX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
+    "💱 원/달러": {"ticker": "KRW=X", "src": "yahoo", "prefix": "", "suffix": "원", "inverse": False},
+    "💱 원/엔 (100엔)": {"ticker": "JPYKRW=X", "src": "yahoo", "prefix": "", "suffix": "원", "inverse": False},
+    "💎 비트코인": {"ticker": "BTC-USD", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
+    "💎 이더리움": {"ticker": "ETH-USD", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
+    "🛢️ WTI 원유": {"ticker": "CL=F", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
+    "🥇 금 선물": {"ticker": "GC=F", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
+    "📈 10년물 국채 금리": {"ticker": "^TNX", "src": "yahoo", "prefix": "", "suffix": "%", "inverse": True}, 
+    "🥶 미국 VIX": {"ticker": "^VIX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": True},
+    "🥶 한국 VKOSPI": {"ticker": "^VKOSPI", "src": "naver_vkospi", "prefix": "", "suffix": "", "inverse": True},
 }
 
 SETTINGS_FILE = "macro_settings.json"
 
 def load_macro_settings():
-    default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇺🇸 나스닥 선물", "💱 원/달러", "💎 비트코인"]
+    default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇰🇷 코스피", "🇺🇸 나스닥 선물", "💱 원/달러", "💎 비트코인"]
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r") as f:
@@ -112,7 +113,6 @@ def save_macro_settings(selected):
             json.dump({"indicators": selected}, f)
     except: pass
 
-# 🚨 전광판 시세는 30초마다 새로고침 (야후 밴 방어 마지노선)
 @st.cache_data(ttl=30) 
 def get_macro_indicators(selected_names_tuple):
     results = {}
@@ -120,23 +120,61 @@ def get_macro_indicators(selected_names_tuple):
     for name in selected_names_tuple:
         info = INDICATORS_CONFIG.get(name)
         if not info: continue
+        
         try:
-            stock = yf.Ticker(info["ticker"])
-            hist = stock.history(period="1mo").dropna(subset=['Close'])
-            if len(hist) >= 2:
-                curr = float(hist['Close'].iloc[-1])
-                prev = float(hist['Close'].iloc[-2])
-                if info["ticker"] == "JPYKRW=X":
-                    curr *= 100
-                    prev *= 100
-                change_val = curr - prev
-                change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
+            # 🚨 1. 네이버 실시간 지수 (코스피/코스닥 0초 딜레이 파싱)
+            if info["src"] == "naver_index":
+                res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
+                data = res.json()['datas'][0]
+                curr = float(data['closePrice'].replace(',', ''))
+                change_pct = float(data['fluctuationsRatio'])
+                change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
+                if change_pct < 0: change_val = -change_val # 하락 시 음수 처리
                 results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
-            else: results[name] = None
-        except: results[name] = None
+            
+            # 🚨 2. 네이버 실시간 주식 (삼성전자/하이닉스 0초 딜레이 파싱)
+            elif info["src"] == "naver_stock":
+                res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
+                data = res.json()['datas'][0]
+                curr = float(data['closePrice'].replace(',', ''))
+                change_pct = float(data['fluctuationsRatio'])
+                change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
+                if change_pct < 0: change_val = -change_val
+                results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
+
+            # 🚨 3. 네이버 VKOSPI (HTML 강제 스크래핑)
+            elif info["src"] == "naver_vkospi":
+                res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+                curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
+                if curr_match:
+                    curr = float(curr_match.group(1))
+                    chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
+                    change_val = float(chg_match.group(1)) if chg_match else 0.0
+                    if "nv01" in res.text: change_val = -change_val
+                    prev = curr - change_val
+                    results[name] = {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
+                else: results[name] = None
+            
+            # 🚨 4. 야후 파이낸스 (글로벌 매크로)
+            elif info["src"] == "yahoo":
+                stock = yf.Ticker(info["ticker"])
+                hist = stock.history(period="1mo").dropna(subset=['Close'])
+                if len(hist) >= 2:
+                    curr = float(hist['Close'].iloc[-1])
+                    prev = float(hist['Close'].iloc[-2])
+                    if info["ticker"] == "JPYKRW=X":
+                        curr *= 100; prev *= 100
+                    change_val = curr - prev
+                    change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
+                    results[name] = {"current": curr, "change_pct": change_pct, "change_val": change_val}
+                else: results[name] = None
+
+        except Exception as e:
+            print(f"Error fetching {name}: {e}")
+            results[name] = None
     return results
 
-# 🚨 구글 시트는 60초마다 새로고침 (API 쿼터 제한 방어)
+# --- 3. 데이터 로드 및 1차 무결점 정제 ---
 @st.cache_data(ttl=60)
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -160,11 +198,22 @@ df = df_raw.copy()
 df_history = df_history_raw.copy()
 df_pnl = df_pnl_raw.copy()
 
-# 🚨 내 종목 현재가도 30초마다 갱신
+# 🚨 내 포트폴리오의 한국 주식도 지연 없이 네이버 API로 가져옵니다!
 @st.cache_data(ttl=30)
 def get_market_data(ticker):
     try:
         if not ticker or not isinstance(ticker, str): return 0.0, 0.0
+        
+        # 한국 주식(.KS, .KQ)은 네이버 0초 딜레이 엔진으로 우회
+        if ticker.endswith('.KS') or ticker.endswith('.KQ'):
+            code = ticker.split('.')[0]
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}", timeout=3)
+            data = res.json()['datas'][0]
+            curr = float(data['closePrice'].replace(',', ''))
+            change_pct = float(data['fluctuationsRatio'])
+            return curr, change_pct
+
+        # 해외 주식 및 환율은 야후 엔진 사용
         stock = yf.Ticker(ticker)
         hist = stock.history(period="5d").dropna(subset=['Close'])
         if len(hist) >= 2: return float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
@@ -185,21 +234,39 @@ def get_dividend_history(ticker):
 # =========================================================
 # 🌟 모바일 100% 원라인 보장 UI
 # =========================================================
+st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
+col_title, col_setting = st.columns([7, 3])
+
 if "macro_selector" not in st.session_state:
     st.session_state.macro_selector = load_macro_settings()
 
 def on_macro_change():
     save_macro_settings(st.session_state.macro_selector)
 
-with st.expander("🌐 글로벌 매크로 전광판 (⚙️ 지표 설정)"):
-    st.multiselect(
-        "표시할 지표 선택 (최대 9개)",
-        options=list(INDICATORS_CONFIG.keys()),
-        key="macro_selector",
-        max_selections=9,
-        on_change=on_macro_change,
-        label_visibility="collapsed"
-    )
+with col_title:
+    st.markdown("<div style='font-size: 16px; font-weight: bold; margin-top: 5px;'>🌐 글로벌 매크로 전광판</div>", unsafe_allow_html=True)
+
+with col_setting:
+    try:
+        with st.popover("⚙️ 설정", use_container_width=True):
+            selected_indicators = st.multiselect(
+                "최대 9개 선택",
+                options=list(INDICATORS_CONFIG.keys()),
+                key="macro_selector",
+                max_selections=9,
+                on_change=on_macro_change,
+                label_visibility="collapsed"
+            )
+    except AttributeError:
+        with st.expander("⚙️ 설정"):
+            selected_indicators = st.multiselect(
+                "최대 9개 선택",
+                options=list(INDICATORS_CONFIG.keys()),
+                key="macro_selector",
+                max_selections=9,
+                on_change=on_macro_change,
+                label_visibility="collapsed"
+            )
 
 macro_data = {} 
 
@@ -207,7 +274,7 @@ if not st.session_state.macro_selector:
     st.caption("선택된 지표가 없습니다. 위의 설정 창을 열어 지표를 추가해 주세요.")
 else:
     macro_data = get_macro_indicators(tuple(st.session_state.macro_selector))
-    html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;">'
+    html_cards = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; margin-bottom: 20px;">'
 
     for name in st.session_state.macro_selector:
         data = macro_data.get(name)
@@ -227,7 +294,10 @@ else:
                 elif d_val < 0: color = profit_down_color 
                 else: color = text_color
             
-            format_str = ",.2f" if "비트코인" not in name else ",.0f" if "원" in suffix else ",.2f"
+            # 주식 가격은 소수점 없이, 나머지는 지표별 맞춤 포맷
+            if info["src"] == "naver_stock": format_str = ",.0f"
+            elif "비트코인" in name: format_str = ",.1f"
+            else: format_str = ",.2f"
             
             html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">'
             html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
