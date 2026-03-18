@@ -21,7 +21,6 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
-# 🚀 [업데이트] 리밸런싱을 위한 사이드바 목표 비중 입력 (숫자형 + 자동 계산)
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
 target_stock = st.sidebar.number_input("📈 주식 비중 (%)", min_value=0, max_value=100, value=50, step=1)
@@ -29,7 +28,6 @@ target_crypto = st.sidebar.number_input("🪙 코인 비중 (%)", min_value=0, m
 target_commodity = st.sidebar.number_input("🛢️ 원자재 비중 (%)", min_value=0, max_value=100, value=10, step=1)
 target_bond = st.sidebar.number_input("📉 채권 비중 (%)", min_value=0, max_value=100, value=20, step=1)
 
-# 무조건 100%가 되도록 마지막 '현금' 비중 자동 계산
 target_cash = 100 - (target_stock + target_crypto + target_commodity + target_bond)
 
 if target_cash < 0:
@@ -64,7 +62,6 @@ st.markdown(f"""
     .stApp, .stApp p, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, .stApp label, .stApp span {{
         color: {text_color} !important;
     }}
-    /* 🚨 [버그 픽스] 사이드바 다크모드 글씨 묻힘 현상 해결 */
     [data-testid="stSidebar"] {{ background-color: {bg_color} !important; border-right: 1px solid {border_color}; }}
     [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label, [data-testid="stSidebar"] div {{
         color: {text_color} !important;
@@ -82,13 +79,14 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
+# 🚀 [요청 반영] 나스닥 선물 -> US Tech 100 선물로 명칭 변경
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 삼성전자": {"ticker": "005930", "src": "naver_stock", "prefix": "", "suffix": "원", "inverse": False},
     "🇰🇷 SK하이닉스": {"ticker": "000660", "src": "naver_stock", "prefix": "", "suffix": "원", "inverse": False},
     "🇺🇸 S&P 500 선물": {"ticker": "ES=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
-    "🇺🇸 나스닥 선물": {"ticker": "NQ=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
+    "🇺🇸 US Tech 100 선물": {"ticker": "NQ=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
     "🇺🇸 다우존스 선물": {"ticker": "YM=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
     "💾 반도체 (SOX)": {"ticker": "^SOX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
     "💱 원/달러": {"ticker": "KRW=X", "src": "yahoo", "prefix": "", "suffix": "원", "inverse": False},
@@ -105,7 +103,7 @@ INDICATORS_CONFIG = {
 SETTINGS_FILE = "macro_settings.json"
 
 def load_macro_settings():
-    default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇰🇷 코스피", "🇺🇸 나스닥 선물", "💱 원/달러", "💎 비트코인"]
+    default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇰🇷 코스피", "🇺🇸 US Tech 100 선물", "💱 원/달러", "💎 비트코인"]
     try:
         if os.path.exists(SETTINGS_FILE):
             with open(SETTINGS_FILE, "r") as f:
@@ -334,9 +332,20 @@ else:
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
-    st.metric(label="💰 총 자산 (원)", value=f"{total_asset:,.0f} 원", delta=f"총 평가손익: {total_profit:,.0f} 원 ({total_profit_pct:,.2f}%)")
+    # 🚀 [요청 반영] 총자산 및 총 평가손익 강조 HTML 카드
+    total_profit_color = profit_up_color if total_profit > 0 else profit_down_color if total_profit < 0 else text_color
+    sign_t = "+" if total_profit > 0 else ""
 
-    # 🚀 [업데이트] 리밸런싱 계산기: 5대 자산군 매핑
+    st.markdown(f"""
+    <div style="background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 12px; padding: 25px; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 25px;">
+        <p style="font-size: 16px; color: gray; margin-bottom: 5px; font-weight: bold;">💰 총 자산 (원)</p>
+        <h1 style="font-size: 42px; color: {text_color}; margin-top: 0px; margin-bottom: 15px;">{total_asset:,.0f}</h1>
+        <hr style="border-top: 1px dashed {border_color}; margin: 15px 0;">
+        <p style="font-size: 14px; color: gray; margin-bottom: 5px; font-weight: bold;">총 평가손익</p>
+        <h2 style="font-size: 28px; color: {total_profit_color}; margin-top: 0px; margin-bottom: 0px;">{sign_t}{total_profit:,.0f} 원 ({sign_t}{total_profit_pct:,.2f}%)</h2>
+    </div>
+    """, unsafe_allow_html=True)
+
     if target_cash >= 0 and total_asset > 0:
         asset_classes = {"주식": 0.0, "코인": 0.0, "원자재": 0.0, "채권": 0.0, "현금": 0.0}
         for _, row in holdings.iterrows():
@@ -355,8 +364,6 @@ else:
             action_val = abs(diff_val) if diff_val != 0 else 0.0
             rebal_data.append({"자산군": ac, "현재 비중": curr_pct, "목표 비중": target_pct, "현재액(원)": curr_val, "목표액(원)": target_val, "Action": action, "필요 금액(원)": action_val})
         rebal_df = pd.DataFrame(rebal_data)
-
-    st.markdown("---")
 
     st.markdown("**📊 포트폴리오 시각화**")
     tab_chart1, tab_chart2, tab_chart3, tab_rebal = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익", "⚖️ 리밸런싱 계산기"])
@@ -411,13 +418,11 @@ else:
     with tab_rebal:
         if target_cash >= 0 and total_asset > 0:
             st.markdown("<div style='font-size: 13px; color: gray; margin-bottom: 10px;'>💡 사이드바에서 설정한 목표 비중으로 맞추기 위한 매매 지침입니다.</div>", unsafe_allow_html=True)
-            
             def style_rebal(val):
                 if isinstance(val, str):
                     if "매수" in val: return f'color: {profit_up_color}; font-weight: bold;'
                     elif "매도" in val: return f'color: {profit_down_color}; font-weight: bold;'
                 return ''
-                
             st.dataframe(
                 rebal_df.style
                 .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px', 'text-align': 'center'})
@@ -436,13 +441,11 @@ else:
     with tab_data1:
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
         display_df.rename(columns={'계산용수량': '수량', '수익률(%)': '수익률', '평가액(원)': '평가액', '손익(원)': '손익'}, inplace=True)
-
         def style_table(val):
             if isinstance(val, (int, float)):
                 color = profit_up_color if val > 0 else profit_down_color if val < 0 else text_color
                 return f'color: {color}; font-weight: bold;'
             return ''
-
         st.dataframe(
             display_df.style
             .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px'})
