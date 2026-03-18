@@ -219,15 +219,26 @@ def get_all_market_data(tickers_tuple):
 
 def fetch_single_dividend(ticker):
     try:
-        if not ticker or not isinstance(ticker, str): return ticker, pd.Series(dtype=float), None
+        if not ticker or not isinstance(ticker, str) or ticker == "KRW=X": 
+            return ticker, pd.Series(dtype=float), None
+            
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
+        
         ex_date = None
         try: 
             info = stock.info
             if 'exDividendDate' in info and info['exDividendDate'] is not None:
-                ex_date = datetime.datetime.fromtimestamp(info['exDividendDate']).strftime('%Y-%m-%d')
+                ed_dt = datetime.datetime.fromtimestamp(info['exDividendDate'])
+                ed_str = ed_dt.strftime('%Y-%m-%d')
+                
+                # 💡 오직 오늘 기준 '미래' 또는 '오늘' 날짜인 경우에만 캘린더에 추가!
+                kst = pytz.timezone('Asia/Seoul')
+                today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
+                if ed_str >= today_str:
+                    ex_date = ed_str
         except: pass
+        
         divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
         return ticker, divs, ex_date
     except: return ticker, pd.Series(dtype=float), None
@@ -334,7 +345,7 @@ else:
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
-    # 🚀 [업데이트] 이전 폼으로 복귀 & 손익 부분 뱃지(Badge) 형태 강조
+    # 🚀 [요청 반영] 가장 깔끔한 이전 버전 롤백 & 손익만 크기/색상/뱃지로 완벽 강조!
     if total_profit > 0:
         profit_color = profit_up_color
         profit_bg = p_up_bg
@@ -478,7 +489,7 @@ else:
         expected_records, calendar_records = [], []
         total_6_months_krw = 0.0
         
-        with st.spinner("과거 2년치 배당 이력을 스캔하여 예측 모델을 구동 중입니다..."):
+        with st.spinner("데이터를 스캔 중입니다... (최초 1회만 약간의 로딩이 발생합니다)"):
             unique_tickers_for_div = tuple(holdings['티커'].unique())
             all_div_history = get_all_dividend_history(unique_tickers_for_div)
 
@@ -486,10 +497,6 @@ else:
                 ticker, name, qty, curr = row['티커'], row['종목명'], row['계산용수량'], row['통화']
                 div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
                 divs, ex_date = div_info["divs"], div_info["ex_date"]
-                
-                # 🚀 [업데이트] 과거 날짜 완벽 필터링 (오늘 이후 데이터만 캘린더에 추가!)
-                if ex_date and ex_date >= today_str: 
-                    calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
                 
                 if divs.empty: continue
                 is_monthly = len(divs) >= 18
@@ -507,12 +514,15 @@ else:
                         expected_krw = expected_div * rate
                         total_6_months_krw += expected_krw
                         expected_records.append({'연월': f"{y}년 {m:02d}월", '종목명': name, '수량': qty, '통화': curr, '예상 주당배당금': dps, '예상 배당금': expected_div, '환산 예상금액(원)': expected_krw})
-        
+
+        # 🚀 [요청 반영] 미래 이벤트 캘린더 안내 및 UI 처리
+        st.markdown("**📅 [예정] 주요 종목 이벤트 캘린더 (오늘 이후)**")
         if calendar_records:
-            st.markdown("**📅 [예정] 주요 종목 이벤트 캘린더 (오늘 이후)**")
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
-            st.markdown("---")
+        else:
+            st.info("📌 현재 야후 파이낸스 기준으로 공식 확정/발표된 다가오는 이벤트(배당락일 등) 일정이 없습니다.\n(기업은 보통 배당락일 2~4주 전에 공식 날짜를 발표합니다.)")
+        st.markdown("---")
 
         if expected_records:
             next_div_df = pd.DataFrame(expected_records)
