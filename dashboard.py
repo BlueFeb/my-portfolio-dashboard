@@ -21,7 +21,7 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
-# 🚀 5대 자산군 리밸런싱 사이드바 (현금 100% 자동 맞춤)
+# 🚀 5대 자산군 리밸런싱 사이드바
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
 target_stock = st.sidebar.number_input("📈 주식 비중 (%)", min_value=0, max_value=100, value=50, step=1)
@@ -62,20 +62,13 @@ else:
 st.markdown(f"""
     <style>
     .stApp {{ background-color: {bg_color}; }}
-    .stApp, .stApp p, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, .stApp label, .stApp span {{
-        color: {text_color} !important;
-    }}
+    .stApp, .stApp p, .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6, .stApp label, .stApp span {{ color: {text_color} !important; }}
     [data-testid="stSidebar"] {{ background-color: {bg_color} !important; border-right: 1px solid {border_color}; }}
-    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label, [data-testid="stSidebar"] div {{
-        color: {text_color} !important;
-    }}
+    [data-testid="stSidebar"] p, [data-testid="stSidebar"] span, [data-testid="stSidebar"] label, [data-testid="stSidebar"] div {{ color: {text_color} !important; }}
     [data-testid="stHeader"] {{ background-color: rgba(0,0,0,0); }}
     .stTabs [data-baseweb="tab-list"] {{ gap: 2px; }}
     .stTabs [data-baseweb="tab"] {{ padding-top: 10px; padding-bottom: 10px; }}
-    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] {{
-        flex-wrap: nowrap !important;
-        align-items: center !important;
-    }}
+    div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] {{ flex-wrap: nowrap !important; align-items: center !important; }}
     div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {{ width: 75% !important; flex: 1 1 75% !important; min-width: 75% !important; }}
     div.element-container:has(.row-widget-hook) + div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2) {{ width: 25% !important; flex: 1 1 25% !important; min-width: 25% !important; }}
     [data-testid="stExpander"] {{ margin-top: -10px; }}
@@ -221,23 +214,18 @@ def fetch_single_dividend(ticker):
     try:
         if not ticker or not isinstance(ticker, str) or ticker == "KRW=X": 
             return ticker, pd.Series(dtype=float), None
-            
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
-        
         ex_date = None
         try: 
             info = stock.info
             if 'exDividendDate' in info and info['exDividendDate'] is not None:
                 ed_dt = datetime.datetime.fromtimestamp(info['exDividendDate'])
                 ed_str = ed_dt.strftime('%Y-%m-%d')
-                
                 kst = pytz.timezone('Asia/Seoul')
                 today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
-                if ed_str >= today_str:
-                    ex_date = ed_str
+                if ed_str >= today_str: ex_date = ed_str
         except: pass
-        
         divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
         return ticker, divs, ex_date
     except: return ticker, pd.Series(dtype=float), None
@@ -252,39 +240,103 @@ def get_all_dividend_history(tickers_tuple):
             results[ticker] = {"divs": divs, "ex_date": ex_date}
     return results
 
-# 🚀 [요청 기능] 이번 주 주요 경제 지표(중간 이상) 파싱 
-@st.cache_data(ttl=300) # 5분 단위 캐싱으로 속도 저하 원천 차단
+# 🚀 [엔진 교체 완료] FXStreet 실시간 API + AI 즉시 해석 로직 적용
+def interpret_indicator(title, actual, forecast):
+    if not actual or str(actual) == '-': return "⏳ 발표 대기중"
+    if not forecast or str(forecast) == '-': return "➖ 단순 발표 (예상치 없음)"
+    try:
+        act_val = float(re.sub(r'[^\d.-]', '', str(actual)))
+        for_val = float(re.sub(r'[^\d.-]', '', str(forecast)))
+    except:
+        return "✅ 발표 완료"
+    
+    diff = act_val - for_val
+    t = title.lower()
+    
+    if any(w in t for w in ["cpi", "pce", "ppi", "inflation", "price", "물가", "index"]):
+        if diff > 0: return "🔻 예상 상회 (인플레 우려/악재)"
+        elif diff < 0: return "🔺 예상 하회 (인플레 둔화/호재)"
+        else: return "➖ 예상 부합"
+    elif any(w in t for w in ["gdp", "pmi", "payroll", "employment", "주문", "판매", "sales", "생산", "manufacturing", "sentiment", "confidence"]):
+        if diff > 0: return "🔺 예상 상회 (경제 탄탄/호재)"
+        elif diff < 0: return "🔻 예상 하회 (경제 부진/악재)"
+        else: return "➖ 예상 부합"
+    elif any(w in t for w in ["unemployment", "실업", "jobless", "claims"]):
+        if diff > 0: return "🔻 예상 상회 (고용 둔화/악재)"
+        elif diff < 0: return "🔺 예상 하회 (고용 탄탄/호재)"
+        else: return "➖ 예상 부합"
+        
+    if diff > 0: return "🔺 예상 상회"
+    elif diff < 0: return "🔻 예상 하회"
+    else: return "➖ 예상 부합"
+
+@st.cache_data(ttl=300) 
 def get_economic_calendar():
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://www.forexfactory.com/', 'Origin': 'https://www.forexfactory.com/'}
-        res = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", headers=headers, timeout=5)
-        if res.status_code != 200: return pd.DataFrame()
-        
-        events = res.json()
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.datetime.now(kst)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        # 전후 3일치 데이터를 여유있게 가져옵니다.
+        start_str = (now_utc - datetime.timedelta(days=3)).strftime('%Y-%m-%dT00:00:00Z')
+        end_str = (now_utc + datetime.timedelta(days=3)).strftime('%Y-%m-%dT23:59:59Z')
+        
+        # 💡 ForexFactory 대신 실시간 업데이트가 보장되는 FXStreet API 호출
+        url = f"https://calendar-api.fxstreet.com/en/api/v1/eventDates/{start_str}/{end_str}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        if res.status_code != 200: return pd.DataFrame()
+        events = res.json()
         
         records = []
         for ev in events:
-            if ev.get('country') not in ['USD', 'KRW']: continue
-            if ev.get('impact') not in ['High', 'Medium']: continue
+            country = ev.get('countryCode', '')
+            if country not in ['US', 'KR']: continue
+            volatility = ev.get('volatility', '')
+            if volatility not in ['HIGH', 'MEDIUM']: continue
+            
+            date_utc_str = ev.get('dateUtc')
+            if not date_utc_str: continue
+            
             try:
-                ev_dt = datetime.datetime.fromisoformat(ev['date']).astimezone(kst)
-                status = "✅ 발표완료" if ev_dt <= now else "⏳ 예정"
+                ev_dt = datetime.datetime.strptime(date_utc_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc).astimezone(kst)
+                
+                title = ev.get('name', '')
+                actual = str(ev.get('actual', '')).strip()
+                forecast = str(ev.get('consensus', '')).strip()
+                previous = str(ev.get('previous', '')).strip()
+                
+                if not actual or actual == 'None': actual = '-'
+                if not forecast or forecast == 'None': forecast = '-'
+                if not previous or previous == 'None': previous = '-'
+                
+                # 💡 시간은 지났는데 값이 안 들어왔다면 "집계중" 처리
+                if ev_dt <= now:
+                    status = "🔄 집계중" if actual == '-' else "✅ 완료"
+                else:
+                    status = "⏳ 예정"
+                    
+                interpretation = interpret_indicator(title, actual, forecast)
+                
                 records.append({
                     "상태": status,
                     "일시": ev_dt.strftime('%m-%d %H:%M'),
-                    "국가": "🇺🇸 USD" if ev.get('country') == 'USD' else "🇰🇷 KRW",
-                    "중요도": "🔥 높음" if ev.get('impact') == 'High' else "⭐ 중간",
-                    "지표명": ev.get('title', ''),
-                    "실제": ev.get('actual', '-'),
-                    "예상": ev.get('forecast', '-'),
-                    "이전": ev.get('previous', '-')
+                    "국가": "🇺🇸 USD" if country == 'US' else "🇰🇷 KRW",
+                    "중요도": "🔥 높음" if volatility == 'HIGH' else "⭐ 중간",
+                    "지표명": title,
+                    "실제": actual,
+                    "예상": forecast,
+                    "이전": previous,
+                    "AI 해석": interpretation
                 })
             except: continue
-        return pd.DataFrame(records)
-    except:
-        return pd.DataFrame()
+            
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = df.sort_values(by="일시", ascending=False)
+        return df
+    except: return pd.DataFrame()
 
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
@@ -494,8 +546,6 @@ else:
     st.markdown("---")
 
     st.markdown("**📋 상세 데이터**")
-    
-    # 🚀 [요청 기능] 탭 구성 추가 (경제 지표 포함)
     tab_data1, tab_data3, tab_data4 = st.tabs(["📊 자산 상세", "🔮 향후 배당 & 이벤트 캘린더", "📅 글로벌 경제 지표"])
 
     with tab_data1:
@@ -532,7 +582,6 @@ else:
                 div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
                 divs, ex_date = div_info["divs"], div_info["ex_date"]
                 
-                # 미래 이벤트만 필터링 보장!
                 if ex_date and ex_date >= today_str: 
                     calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
                 
@@ -558,7 +607,7 @@ else:
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
         else:
-            st.info("📌 현재 기준(오늘 이후)으로 야후 파이낸스에 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
+            st.info("📌 현재 기준(오늘 이후)으로 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
         st.markdown("---")
 
         if expected_records:
@@ -569,14 +618,14 @@ else:
             st.plotly_chart(fig_next, use_container_width=True)
             st.caption("※ 과거 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
 
-    # 🚀 [요청 반영] 신규 탭: 글로벌 경제 지표 시각화 처리
     with tab_data4:
         st.markdown("**📅 이번 주 주요 경제 지표 (미국/한국, ⭐️중간 이상 중요도)**")
         eco_df = get_economic_calendar()
         if not eco_df.empty:
             def highlight_status(val):
-                if val == "✅ 발표완료": return f'color: gray;'
-                elif val == "⏳ 예정": return f'color: {profit_up_color}; font-weight: bold;'
+                if val == "✅ 완료": return f'color: {profit_up_color}; font-weight: bold;'
+                elif val == "🔄 집계중": return f'color: {gold_highlight}; font-weight: bold;'
+                elif val == "⏳ 예정": return f'color: gray;'
                 return ''
             
             st.dataframe(
@@ -585,7 +634,7 @@ else:
                 .map(highlight_status, subset=['상태']),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 정보는 ForexFactory 데이터를 기반으로 5분마다 최신화됩니다.")
+            st.caption("※ 정보는 FXStreet 실시간 데이터를 기반으로 5분마다 최신화됩니다.")
         else:
             st.info("이번 주 예정된 주요 지표가 없거나, 데이터 서버 지연으로 불러올 수 없습니다.")
 
