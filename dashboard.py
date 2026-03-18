@@ -21,6 +21,7 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
+# 🚀 5대 자산군 리밸런싱 사이드바 (숫자 입력 & 100% 자동 맞춤)
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
 target_stock = st.sidebar.number_input("📈 주식 비중 (%)", min_value=0, max_value=100, value=50, step=1)
@@ -28,12 +29,13 @@ target_crypto = st.sidebar.number_input("🪙 코인 비중 (%)", min_value=0, m
 target_commodity = st.sidebar.number_input("🛢️ 원자재 비중 (%)", min_value=0, max_value=100, value=10, step=1)
 target_bond = st.sidebar.number_input("📉 채권 비중 (%)", min_value=0, max_value=100, value=20, step=1)
 
+# 마지막 '현금'은 100%에서 나머지를 뺀 값으로 강제 고정
 target_cash = 100 - (target_stock + target_crypto + target_commodity + target_bond)
 
 if target_cash < 0:
-    st.sidebar.error(f"⚠️ 합계가 100%를 초과했습니다! (현재: 초과 {abs(target_cash)}%)")
+    st.sidebar.error(f"⚠️ 합계가 100%를 초과했습니다! (초과분: {abs(target_cash)}%)")
 else:
-    st.sidebar.info(f"💵 현금 비중: {target_cash}%\n(무조건 100%가 되도록 자동 계산됨)")
+    st.sidebar.info(f"💵 현금 비중: {target_cash}%\n(합계 100% 자동 계산)")
 
 st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 
@@ -79,7 +81,6 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# 🚀 [요청 반영] 나스닥 선물 -> US Tech 100 선물로 명칭 변경
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
     "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
@@ -215,17 +216,30 @@ def get_all_market_data(tickers_tuple):
             results[ticker] = (price, change)
     return results
 
+# 🚀 [속도 최적화 & 미래 데이터 필터링] 
 def fetch_single_dividend(ticker):
     try:
-        if not ticker or not isinstance(ticker, str): return ticker, pd.Series(dtype=float), None
+        if not ticker or not isinstance(ticker, str) or ticker == "KRW=X": 
+            return ticker, pd.Series(dtype=float), None
+            
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
+        
         ex_date = None
         try: 
+            # yf.info를 호출하되 에러/지연을 방지하기 위해 가장 빠르게 확인
             info = stock.info
             if 'exDividendDate' in info and info['exDividendDate'] is not None:
-                ex_date = datetime.datetime.fromtimestamp(info['exDividendDate']).strftime('%Y-%m-%d')
+                ed_dt = datetime.datetime.fromtimestamp(info['exDividendDate'])
+                ed_str = ed_dt.strftime('%Y-%m-%d')
+                
+                # 💡 오직 오늘 기준 '미래' 또는 '오늘' 날짜인 경우에만 캘린더에 추가!
+                kst = pytz.timezone('Asia/Seoul')
+                today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
+                if ed_str >= today_str:
+                    ex_date = ed_str
         except: pass
+        
         divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
         return ticker, divs, ex_date
     except: return ticker, pd.Series(dtype=float), None
@@ -332,17 +346,17 @@ else:
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
-    # 🚀 [요청 반영] 총자산 및 총 평가손익 강조 HTML 카드
+    # 🚀 [요청 반영] 가장 깔끔한 이전 버전 롤백 & 손익만 크기/색상 강조
     total_profit_color = profit_up_color if total_profit > 0 else profit_down_color if total_profit < 0 else text_color
     sign_t = "+" if total_profit > 0 else ""
 
     st.markdown(f"""
-    <div style="background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 12px; padding: 25px; text-align: center; box-shadow: 0 4px 10px rgba(0,0,0,0.05); margin-bottom: 25px;">
-        <p style="font-size: 16px; color: gray; margin-bottom: 5px; font-weight: bold;">💰 총 자산 (원)</p>
-        <h1 style="font-size: 42px; color: {text_color}; margin-top: 0px; margin-bottom: 15px;">{total_asset:,.0f}</h1>
-        <hr style="border-top: 1px dashed {border_color}; margin: 15px 0;">
-        <p style="font-size: 14px; color: gray; margin-bottom: 5px; font-weight: bold;">총 평가손익</p>
-        <h2 style="font-size: 28px; color: {total_profit_color}; margin-top: 0px; margin-bottom: 0px;">{sign_t}{total_profit:,.0f} 원 ({sign_t}{total_profit_pct:,.2f}%)</h2>
+    <div style="padding: 10px 0px; margin-bottom: 15px;">
+        <p style="font-size: 14px; margin-bottom: 0px; color: {text_color};">💰 총 자산 (원)</p>
+        <p style="font-size: 36px; font-weight: bold; margin-top: 0px; margin-bottom: 8px; color: {text_color};">{total_asset:,.0f} 원</p>
+        <p style="font-size: 20px; font-weight: 700; margin-top: 0px; color: {total_profit_color};">
+            {sign_t}{total_profit:,.0f} 원 ({sign_t}{total_profit_pct:,.2f}%)
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -364,6 +378,8 @@ else:
             action_val = abs(diff_val) if diff_val != 0 else 0.0
             rebal_data.append({"자산군": ac, "현재 비중": curr_pct, "목표 비중": target_pct, "현재액(원)": curr_val, "목표액(원)": target_val, "Action": action, "필요 금액(원)": action_val})
         rebal_df = pd.DataFrame(rebal_data)
+
+    st.markdown("---")
 
     st.markdown("**📊 포트폴리오 시각화**")
     tab_chart1, tab_chart2, tab_chart3, tab_rebal = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익", "⚖️ 리밸런싱 계산기"])
@@ -436,7 +452,7 @@ else:
     st.markdown("---")
 
     st.markdown("**📋 상세 데이터**")
-    tab_data1, tab_data3 = st.tabs(["📊 자산 상세", "🔮 향후 6개월 배당 & 이벤트"])
+    tab_data1, tab_data3 = st.tabs(["📊 자산 상세", "🔮 향후 배당 & 이벤트 캘린더"])
 
     with tab_data1:
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
@@ -462,7 +478,7 @@ else:
         expected_records, calendar_records = [], []
         total_6_months_krw = 0.0
         
-        with st.spinner("과거 2년치 배당 이력을 스캔 및 이벤트 캘린더를 동기화 중입니다..."):
+        with st.spinner("과거 2년치 배당 이력을 스캔하여 예측 모델을 구동 중입니다..."):
             unique_tickers_for_div = tuple(holdings['티커'].unique())
             all_div_history = get_all_dividend_history(unique_tickers_for_div)
 
@@ -471,7 +487,8 @@ else:
                 div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
                 divs, ex_date = div_info["divs"], div_info["ex_date"]
                 
-                if ex_date: calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 최근/예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
+                # 🚀 미래 이벤트만 추가되도록 필터링!
+                if ex_date: calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
                 
                 if divs.empty: continue
                 is_monthly = len(divs) >= 18
@@ -491,8 +508,8 @@ else:
                         expected_records.append({'연월': f"{y}년 {m:02d}월", '종목명': name, '수량': qty, '통화': curr, '예상 주당배당금': dps, '예상 배당금': expected_div, '환산 예상금액(원)': expected_krw})
         
         if calendar_records:
-            st.markdown("**📅 [New] 주요 종목 이벤트 캘린더**")
-            cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=False)
+            st.markdown("**📅 [예정] 주요 종목 이벤트 캘린더 (오늘 이후)**")
+            cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
             st.markdown("---")
 
@@ -502,7 +519,7 @@ else:
             fig_next = px.bar(next_div_df, x='연월', y='환산 예상금액(원)', color='종목명', hover_data={'예상 배당금': ':.2f', '통화': True}, color_discrete_sequence=pastel_colors)
             fig_next.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=10, l=10, r=10), barmode='stack')
             st.plotly_chart(fig_next, use_container_width=True)
-            st.caption("※ 과거 2년 치 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
+            st.caption("※ 과거 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
 
 if auto_refresh:
     time.sleep(30)
