@@ -232,7 +232,6 @@ def fetch_single_dividend(ticker):
                 ed_dt = datetime.datetime.fromtimestamp(info['exDividendDate'])
                 ed_str = ed_dt.strftime('%Y-%m-%d')
                 
-                # 💡 오직 오늘 기준 '미래' 또는 '오늘' 날짜인 경우에만 캘린더에 추가!
                 kst = pytz.timezone('Asia/Seoul')
                 today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
                 if ed_str >= today_str:
@@ -252,6 +251,40 @@ def get_all_dividend_history(tickers_tuple):
             ticker, divs, ex_date = future.result()
             results[ticker] = {"divs": divs, "ex_date": ex_date}
     return results
+
+# 🚀 [요청 기능] 이번 주 주요 경제 지표(중간 이상) 파싱 
+@st.cache_data(ttl=300) # 5분 단위 캐싱으로 속도 저하 원천 차단
+def get_economic_calendar():
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://www.forexfactory.com/', 'Origin': 'https://www.forexfactory.com/'}
+        res = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", headers=headers, timeout=5)
+        if res.status_code != 200: return pd.DataFrame()
+        
+        events = res.json()
+        kst = pytz.timezone('Asia/Seoul')
+        now = datetime.datetime.now(kst)
+        
+        records = []
+        for ev in events:
+            if ev.get('country') not in ['USD', 'KRW']: continue
+            if ev.get('impact') not in ['High', 'Medium']: continue
+            try:
+                ev_dt = datetime.datetime.fromisoformat(ev['date']).astimezone(kst)
+                status = "✅ 발표완료" if ev_dt <= now else "⏳ 예정"
+                records.append({
+                    "상태": status,
+                    "일시": ev_dt.strftime('%m-%d %H:%M'),
+                    "국가": "🇺🇸 USD" if ev.get('country') == 'USD' else "🇰🇷 KRW",
+                    "중요도": "🔥 높음" if ev.get('impact') == 'High' else "⭐ 중간",
+                    "지표명": ev.get('title', ''),
+                    "실제": ev.get('actual', '-'),
+                    "예상": ev.get('forecast', '-'),
+                    "이전": ev.get('previous', '-')
+                })
+            except: continue
+        return pd.DataFrame(records)
+    except:
+        return pd.DataFrame()
 
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
@@ -345,7 +378,6 @@ else:
     total_profit = total_asset - total_cost
     total_profit_pct = (total_profit / total_cost * 100) if total_cost > 0 else 0.0
 
-    # 🚀 [요청 반영] 가장 깔끔한 이전 버전 롤백 & 손익만 크기/색상/뱃지로 완벽 강조!
     if total_profit > 0:
         profit_color = profit_up_color
         profit_bg = p_up_bg
@@ -462,7 +494,9 @@ else:
     st.markdown("---")
 
     st.markdown("**📋 상세 데이터**")
-    tab_data1, tab_data3 = st.tabs(["📊 자산 상세", "🔮 향후 배당 & 이벤트 캘린더"])
+    
+    # 🚀 [요청 기능] 탭 구성 추가 (경제 지표 포함)
+    tab_data1, tab_data3, tab_data4 = st.tabs(["📊 자산 상세", "🔮 향후 배당 & 이벤트 캘린더", "📅 글로벌 경제 지표"])
 
     with tab_data1:
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
@@ -489,7 +523,7 @@ else:
         expected_records, calendar_records = [], []
         total_6_months_krw = 0.0
         
-        with st.spinner("데이터를 스캔 중입니다... (최초 1회만 약간의 로딩이 발생합니다)"):
+        with st.spinner("데이터를 분석 중입니다... (최초 1회만 로딩)"):
             unique_tickers_for_div = tuple(holdings['티커'].unique())
             all_div_history = get_all_dividend_history(unique_tickers_for_div)
 
@@ -497,6 +531,10 @@ else:
                 ticker, name, qty, curr = row['티커'], row['종목명'], row['계산용수량'], row['통화']
                 div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
                 divs, ex_date = div_info["divs"], div_info["ex_date"]
+                
+                # 미래 이벤트만 필터링 보장!
+                if ex_date and ex_date >= today_str: 
+                    calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
                 
                 if divs.empty: continue
                 is_monthly = len(divs) >= 18
@@ -515,13 +553,12 @@ else:
                         total_6_months_krw += expected_krw
                         expected_records.append({'연월': f"{y}년 {m:02d}월", '종목명': name, '수량': qty, '통화': curr, '예상 주당배당금': dps, '예상 배당금': expected_div, '환산 예상금액(원)': expected_krw})
 
-        # 🚀 [요청 반영] 미래 이벤트 캘린더 안내 및 UI 처리
         st.markdown("**📅 [예정] 주요 종목 이벤트 캘린더 (오늘 이후)**")
         if calendar_records:
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
         else:
-            st.info("📌 현재 야후 파이낸스 기준으로 공식 확정/발표된 다가오는 이벤트(배당락일 등) 일정이 없습니다.\n(기업은 보통 배당락일 2~4주 전에 공식 날짜를 발표합니다.)")
+            st.info("📌 현재 기준(오늘 이후)으로 야후 파이낸스에 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
         st.markdown("---")
 
         if expected_records:
@@ -531,6 +568,26 @@ else:
             fig_next.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=20, b=10, l=10, r=10), barmode='stack')
             st.plotly_chart(fig_next, use_container_width=True)
             st.caption("※ 과거 배당 패턴을 분석한 결과이며, 데이터 제공 지연으로 누락될 수 있습니다.")
+
+    # 🚀 [요청 반영] 신규 탭: 글로벌 경제 지표 시각화 처리
+    with tab_data4:
+        st.markdown("**📅 이번 주 주요 경제 지표 (미국/한국, ⭐️중간 이상 중요도)**")
+        eco_df = get_economic_calendar()
+        if not eco_df.empty:
+            def highlight_status(val):
+                if val == "✅ 발표완료": return f'color: gray;'
+                elif val == "⏳ 예정": return f'color: {profit_up_color}; font-weight: bold;'
+                return ''
+            
+            st.dataframe(
+                eco_df.style
+                .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'})
+                .map(highlight_status, subset=['상태']),
+                use_container_width=True, hide_index=True
+            )
+            st.caption("※ 정보는 ForexFactory 데이터를 기반으로 5분마다 최신화됩니다.")
+        else:
+            st.info("이번 주 예정된 주요 지표가 없거나, 데이터 서버 지연으로 불러올 수 없습니다.")
 
 if auto_refresh:
     time.sleep(30)
