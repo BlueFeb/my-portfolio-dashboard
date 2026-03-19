@@ -21,7 +21,7 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
-# 🚀 5대 자산군 리밸런싱 사이드바
+# 🚀 5대 자산군 리밸런싱 사이드바 (현금 100% 자동 맞춤)
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
 target_stock = st.sidebar.number_input("📈 주식 비중 (%)", min_value=0, max_value=100, value=50, step=1)
@@ -92,7 +92,6 @@ INDICATORS_CONFIG = {
     "🥇 금 선물": {"ticker": "GC=F", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
     "📈 10년물 국채 금리": {"ticker": "^TNX", "src": "yahoo", "prefix": "", "suffix": "%", "inverse": True}, 
     "🥶 미국 VIX": {"ticker": "^VIX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": True},
-    "🥶 한국 VKOSPI": {"ticker": "^VKOSPI", "src": "naver_vkospi", "prefix": "", "suffix": "", "inverse": True},
 }
 
 SETTINGS_FILE = "macro_settings.json"
@@ -114,6 +113,7 @@ def save_macro_settings(selected):
         with open(SETTINGS_FILE, "w") as f: json.dump({"indicators": selected}, f)
     except: pass
 
+# 🚀 [업데이트] 야후 파이낸스 실시간 초고속 통신망 (0초 딜레이)
 def fetch_single_macro(name, info):
     try:
         if info["src"] == "naver_index":
@@ -130,26 +130,18 @@ def fetch_single_macro(name, info):
             change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
             if change_pct < 0: change_val = -change_val
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-        elif info["src"] == "naver_vkospi":
-            res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-            curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
-            if curr_match:
-                curr = float(curr_match.group(1))
-                chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
-                change_val = float(chg_match.group(1)) if chg_match else 0.0
-                if "nv01" in res.text: change_val = -change_val
-                prev = curr - change_val
-                return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
-            return name, None
         elif info["src"] == "yahoo":
-            stock = yf.Ticker(info["ticker"])
-            hist = stock.history(period="5d").dropna(subset=['Close'])
-            if len(hist) >= 2:
-                curr, prev = float(hist['Close'].iloc[-1]), float(hist['Close'].iloc[-2])
-                if info["ticker"] == "JPYKRW=X": curr *= 100; prev *= 100
-                change_val = curr - prev
-                return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev != 0 else 0.0, "change_val": change_val}
-            return name, None
+            # Yfinance 라이브러리를 아예 버리고 야후 내부 API 직접 타격!
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            res = requests.get(url, headers=headers, timeout=5)
+            meta = res.json()['chart']['result'][0]['meta']
+            curr = float(meta['regularMarketPrice'])
+            prev = float(meta['chartPreviousClose'])
+            if info["ticker"] == "JPYKRW=X": curr *= 100; prev *= 100
+            change_val = curr - prev
+            change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
+            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
     except: return name, None
 
 @st.cache_data(ttl=30) 
@@ -193,11 +185,16 @@ def fetch_single_price(ticker):
             res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}", timeout=3)
             data = res.json()['datas'][0]
             return ticker, float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="5d").dropna(subset=['Close'])
-        if len(hist) >= 2: return ticker, float(hist['Close'].iloc[-1]), ((float(hist['Close'].iloc[-1]) - float(hist['Close'].iloc[-2])) / float(hist['Close'].iloc[-2])) * 100
-        elif len(hist) == 1: return ticker, float(hist['Close'].iloc[0]), 0.0
-        return ticker, 0.0, 0.0
+        
+        # 포트폴리오 미국 주식도 야후 API 직접 타격 (0초 딜레이)
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2d&interval=1m"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=5)
+        meta = res.json()['chart']['result'][0]['meta']
+        curr = float(meta['regularMarketPrice'])
+        prev = float(meta['chartPreviousClose'])
+        change_pct = ((curr - prev) / prev) * 100 if prev > 0 else 0.0
+        return ticker, curr, change_pct
     except: return ticker, 0.0, 0.0
 
 @st.cache_data(ttl=30)
@@ -226,7 +223,7 @@ def fetch_single_dividend(ticker):
                 today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
                 if ed_str >= today_str: ex_date = ed_str
         except: pass
-        divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
+        divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in columns else pd.Series(dtype=float)
         return ticker, divs, ex_date
     except: return ticker, pd.Series(dtype=float), None
 
@@ -240,7 +237,7 @@ def get_all_dividend_history(tickers_tuple):
             results[ticker] = {"divs": divs, "ex_date": ex_date}
     return results
 
-# 🚀 [엔진 교체 완료] FXStreet 실시간 API + AI 즉시 해석 로직 적용
+# 🚀 [업데이트] 경제 지표 AI 퀵해석 함수 (집계중 로직 추가)
 def interpret_indicator(title, actual, forecast):
     if not actual or str(actual) == '-': return "⏳ 발표 대기중"
     if not forecast or str(forecast) == '-': return "➖ 단순 발표 (예상치 없음)"
@@ -257,7 +254,7 @@ def interpret_indicator(title, actual, forecast):
         if diff > 0: return "🔻 예상 상회 (인플레 우려/악재)"
         elif diff < 0: return "🔺 예상 하회 (인플레 둔화/호재)"
         else: return "➖ 예상 부합"
-    elif any(w in t for w in ["gdp", "pmi", "payroll", "employment", "주문", "판매", "sales", "생산", "manufacturing", "sentiment", "confidence"]):
+    elif any(w in t for w in ["gdp", "pmi", "payroll", "employment", "주문", "판매", "sales", "생산", "manufacturing", "sentiment"]):
         if diff > 0: return "🔺 예상 상회 (경제 탄탄/호재)"
         elif diff < 0: return "🔻 예상 하회 (경제 부진/악재)"
         else: return "➖ 예상 부합"
@@ -273,57 +270,42 @@ def interpret_indicator(title, actual, forecast):
 @st.cache_data(ttl=300) 
 def get_economic_calendar():
     try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://www.forexfactory.com/', 'Origin': 'https://www.forexfactory.com/'}
+        res = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", headers=headers, timeout=5)
+        if res.status_code != 200: return pd.DataFrame()
+        
+        events = res.json()
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.datetime.now(kst)
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        
-        # 전후 3일치 데이터를 여유있게 가져옵니다.
-        start_str = (now_utc - datetime.timedelta(days=3)).strftime('%Y-%m-%dT00:00:00Z')
-        end_str = (now_utc + datetime.timedelta(days=3)).strftime('%Y-%m-%dT23:59:59Z')
-        
-        # 💡 ForexFactory 대신 실시간 업데이트가 보장되는 FXStreet API 호출
-        url = f"https://calendar-api.fxstreet.com/en/api/v1/eventDates/{start_str}/{end_str}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers, timeout=5)
-        
-        if res.status_code != 200: return pd.DataFrame()
-        events = res.json()
         
         records = []
         for ev in events:
-            country = ev.get('countryCode', '')
-            if country not in ['US', 'KR']: continue
-            volatility = ev.get('volatility', '')
-            if volatility not in ['HIGH', 'MEDIUM']: continue
-            
-            date_utc_str = ev.get('dateUtc')
-            if not date_utc_str: continue
-            
+            if ev.get('country') not in ['USD', 'KRW']: continue
+            if ev.get('impact') not in ['High', 'Medium']: continue
             try:
-                ev_dt = datetime.datetime.strptime(date_utc_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc).astimezone(kst)
+                ev_dt = datetime.datetime.fromisoformat(ev['date']).astimezone(kst)
                 
-                title = ev.get('name', '')
                 actual = str(ev.get('actual', '')).strip()
-                forecast = str(ev.get('consensus', '')).strip()
+                forecast = str(ev.get('forecast', '')).strip()
                 previous = str(ev.get('previous', '')).strip()
                 
-                if not actual or actual == 'None': actual = '-'
-                if not forecast or forecast == 'None': forecast = '-'
-                if not previous or previous == 'None': previous = '-'
+                if not actual: actual = '-'
+                if not forecast: forecast = '-'
+                if not previous: previous = '-'
                 
-                # 💡 시간은 지났는데 값이 안 들어왔다면 "집계중" 처리
                 if ev_dt <= now:
                     status = "🔄 집계중" if actual == '-' else "✅ 완료"
                 else:
                     status = "⏳ 예정"
                     
+                title = ev.get('title', '')
                 interpretation = interpret_indicator(title, actual, forecast)
                 
                 records.append({
                     "상태": status,
                     "일시": ev_dt.strftime('%m-%d %H:%M'),
-                    "국가": "🇺🇸 USD" if country == 'US' else "🇰🇷 KRW",
-                    "중요도": "🔥 높음" if volatility == 'HIGH' else "⭐ 중간",
+                    "국가": "🇺🇸 USD" if ev.get('country') == 'USD' else "🇰🇷 KRW",
+                    "중요도": "🔥 높음" if ev.get('impact') == 'High' else "⭐ 중간",
                     "지표명": title,
                     "실제": actual,
                     "예상": forecast,
@@ -331,11 +313,7 @@ def get_economic_calendar():
                     "AI 해석": interpretation
                 })
             except: continue
-            
-        df = pd.DataFrame(records)
-        if not df.empty:
-            df = df.sort_values(by="일시", ascending=False)
-        return df
+        return pd.DataFrame(records)
     except: return pd.DataFrame()
 
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
@@ -607,7 +585,7 @@ else:
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
         else:
-            st.info("📌 현재 기준(오늘 이후)으로 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
+            st.info("📌 현재 기준(오늘 이후)으로 야후 파이낸스에 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
         st.markdown("---")
 
         if expected_records:
@@ -634,7 +612,7 @@ else:
                 .map(highlight_status, subset=['상태']),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 정보는 FXStreet 실시간 데이터를 기반으로 5분마다 최신화됩니다.")
+            st.caption("※ 정보는 실시간 데이터를 기반으로 5분마다 최신화됩니다.")
         else:
             st.info("이번 주 예정된 주요 지표가 없거나, 데이터 서버 지연으로 불러올 수 없습니다.")
 
