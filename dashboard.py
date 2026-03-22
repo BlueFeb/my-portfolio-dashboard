@@ -21,7 +21,7 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
-# 🚀 [업데이트] 사이드바 설정 영구 저장 로직
+# 🚀 사이드바 설정 영구 저장 로직
 SIDEBAR_SETTINGS_FILE = "sidebar_settings.json"
 
 def load_sidebar_settings():
@@ -63,7 +63,6 @@ else:
     st.sidebar.info(f"💵 현금 비중: {target_cash}%\n(합계 100% 자동 계산)")
 
 st.sidebar.markdown("---")
-# 🚀 [버그 픽스] 토글에 Key와 콜백을 달아 오류 차단 및 상태 저장
 show_drawdown_table = st.sidebar.toggle("📊 주요 지수 ETF 낙폭 기준표 보기", value=ss["show_drawdown"], key="show_drawdown", on_change=save_sidebar_settings)
 
 st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
@@ -77,7 +76,6 @@ if is_dark_mode:
     line_color = '#FF99CC'
     profit_up_color, profit_down_color = '#FF9999', '#99CCFF' 
     p_up_bg, p_dn_bg = "rgba(255, 153, 153, 0.12)", "rgba(153, 204, 255, 0.12)"
-    gold_highlight = '#FFD700' 
 else:
     bg_color, text_color = "#F8F9FA", "#212529"
     df_bg, df_text = "#FFFFFF", "#212529"
@@ -87,7 +85,6 @@ else:
     line_color = '#FF6699'
     profit_up_color, profit_down_color = '#E63946', '#457B9D'
     p_up_bg, p_dn_bg = "rgba(230, 57, 70, 0.08)", "rgba(69, 123, 157, 0.08)"
-    gold_highlight = '#B8860B'
 
 st.markdown(f"""
     <style>
@@ -174,7 +171,7 @@ def fetch_single_macro(name, info):
             return name, None
         elif info["src"] == "yahoo":
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            headers = {'User-Agent': 'Mozilla/5.0'}
             res = requests.get(url, headers=headers, timeout=5)
             meta = res.json()['chart']['result'][0]['meta']
             curr = float(meta['regularMarketPrice'])
@@ -247,25 +244,27 @@ def get_all_market_data(tickers_tuple):
             results[ticker] = (price, change)
     return results
 
+# 🚀 [업데이트] 배당락일 공식 데이터 + AI 추정 기록 추가 반환
 def fetch_single_dividend(ticker):
     try:
         if not ticker or not isinstance(ticker, str) or ticker == "KRW=X": 
-            return ticker, pd.Series(dtype=float), None
+            return ticker, pd.Series(dtype=float), None, None
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
+        
         ex_date = None
         try: 
             info = stock.info
             if 'exDividendDate' in info and info['exDividendDate'] is not None:
                 ed_dt = datetime.datetime.fromtimestamp(info['exDividendDate'])
-                ed_str = ed_dt.strftime('%Y-%m-%d')
-                kst = pytz.timezone('Asia/Seoul')
-                today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
-                if ed_str >= today_str: ex_date = ed_str
+                ex_date = ed_dt.strftime('%Y-%m-%d')
         except: pass
+        
         divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
-        return ticker, divs, ex_date
-    except: return ticker, pd.Series(dtype=float), None
+        last_div_date = divs.index[-1] if not divs.empty else None
+        
+        return ticker, divs, ex_date, last_div_date
+    except: return ticker, pd.Series(dtype=float), None, None
 
 @st.cache_data(ttl=86400) 
 def get_all_dividend_history(tickers_tuple):
@@ -273,8 +272,8 @@ def get_all_dividend_history(tickers_tuple):
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(fetch_single_dividend, t): t for t in tickers_tuple}
         for future in as_completed(futures):
-            ticker, divs, ex_date = future.result()
-            results[ticker] = {"divs": divs, "ex_date": ex_date}
+            ticker, divs, ex_date, last_div_date = future.result()
+            results[ticker] = {"divs": divs, "ex_date": ex_date, "last_div_date": last_div_date}
     return results
 
 def interpret_indicator(title, actual, forecast):
@@ -304,39 +303,31 @@ def interpret_indicator(title, actual, forecast):
     elif diff < 0: return "🔻 예상 하회"
     else: return "➖ 예상 부합"
 
+# 🚀 [업데이트] 차단율이 낮은 ForexFactory API로 복구 및 방어코드 강화
 @st.cache_data(ttl=300) 
 def get_economic_calendar():
     try:
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.datetime.now(kst)
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
         
-        start_str = (now_utc - datetime.timedelta(days=3)).strftime('%Y-%m-%dT00:00:00Z')
-        end_str = (now_utc + datetime.timedelta(days=3)).strftime('%Y-%m-%dT23:59:59Z')
-        
-        url = f"https://calendar-api.fxstreet.com/en/api/v1/eventDates/{start_str}/{end_str}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        res = requests.get(url, headers=headers, timeout=5)
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers, timeout=8)
         
         if res.status_code != 200: return pd.DataFrame()
         events = res.json()
         
         records = []
         for ev in events:
-            country = ev.get('countryCode', '')
-            if country not in ['US', 'KR']: continue
-            volatility = ev.get('volatility', '')
-            if volatility not in ['HIGH', 'MEDIUM']: continue
-            
-            date_utc_str = ev.get('dateUtc')
-            if not date_utc_str: continue
+            country = ev.get('country', '')
+            impact = ev.get('impact', '')
+            if country not in ['USD', 'KRW'] or impact not in ['High', 'Medium']: continue
             
             try:
-                ev_dt = datetime.datetime.strptime(date_utc_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc).astimezone(kst)
-                
-                title = ev.get('name', '')
+                ev_dt = datetime.datetime.fromisoformat(ev['date']).astimezone(kst)
+                title = ev.get('title', '')
                 actual = str(ev.get('actual', '')).strip()
-                forecast = str(ev.get('consensus', '')).strip()
+                forecast = str(ev.get('forecast', '')).strip()
                 previous = str(ev.get('previous', '')).strip()
                 
                 if not actual or actual == 'None': actual = '-'
@@ -353,8 +344,8 @@ def get_economic_calendar():
                 records.append({
                     "상태": status,
                     "일시": ev_dt.strftime('%m-%d %H:%M'),
-                    "국가": "🇺🇸 USD" if country == 'US' else "🇰🇷 KRW",
-                    "중요도": "🔥 높음" if volatility == 'HIGH' else "⭐ 중간",
+                    "국가": "🇺🇸 USD" if country == 'USD' else "🇰🇷 KRW",
+                    "중요도": "🔥 높음" if impact == 'High' else "⭐ 중간",
                     "지표명": title,
                     "실제": actual,
                     "예상": forecast,
@@ -594,7 +585,6 @@ else:
                 st.info("데이터를 불러올 수 없습니다.")
         st.markdown("---")
 
-    # 🚀 [완벽 복구] 삭제되었던 포트폴리오 시각화 그래프 탭 복구!
     st.markdown("**📊 포트폴리오 시각화**")
     tab_chart1, tab_chart2, tab_chart3 = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익"])
 
@@ -681,12 +671,29 @@ else:
 
             for _, row in holdings.iterrows():
                 ticker, name, qty, curr = row['티커'], row['종목명'], row['계산용수량'], row['통화']
-                div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None})
-                divs, ex_date = div_info["divs"], div_info["ex_date"]
+                div_info = all_div_history.get(ticker, {"divs": pd.Series(dtype=float), "ex_date": None, "last_div_date": None})
+                divs, ex_date, last_div_date = div_info["divs"], div_info["ex_date"], div_info["last_div_date"]
                 
+                added_to_calendar = False
                 if ex_date and ex_date >= today_str: 
-                    calendar_records.append({"종목명": name, "티커": ticker, "이벤트": "💸 예정 배당락일 (Ex-Dividend)", "날짜": ex_date})
+                    calendar_records.append({"종목명": name, "티커": ticker, "구분": "✅ 확정", "날짜": ex_date, "내용": "배당락일"})
+                    added_to_calendar = True
                 
+                # 🚀 [업데이트] AI 배당락일 예측(Predict) 알고리즘
+                if not added_to_calendar and not divs.empty and last_div_date is not None:
+                    try:
+                        if len(divs) >= 18: days_to_add = 30
+                        elif len(divs) >= 6: days_to_add = 91
+                        else: days_to_add = 365
+                        
+                        est_date = last_div_date + datetime.timedelta(days=days_to_add)
+                        while est_date.strftime('%Y-%m-%d') < today_str:
+                            est_date += datetime.timedelta(days=days_to_add)
+                            
+                        if est_date <= now + datetime.timedelta(days=180):
+                            calendar_records.append({"종목명": name, "티커": ticker, "구분": "🤔 예상(AI)", "날짜": est_date.strftime('%Y-%m-%d'), "내용": "배당락일 (추정)"})
+                    except: pass
+
                 if divs.empty: continue
                 is_monthly = len(divs) >= 18
                 
@@ -704,12 +711,13 @@ else:
                         total_6_months_krw += expected_krw
                         expected_records.append({'연월': f"{y}년 {m:02d}월", '종목명': name, '수량': qty, '통화': curr, '예상 주당배당금': dps, '예상 배당금': expected_div, '환산 예상금액(원)': expected_krw})
 
-        st.markdown("**📅 [예정] 주요 종목 이벤트 캘린더 (오늘 이후)**")
+        st.markdown("**📅 주요 종목 이벤트 캘린더 (오늘 이후)**")
         if calendar_records:
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
+            st.caption("※ '✅ 확정'은 야후 파이낸스 공식 발표 날짜이며, '🤔 예상(AI)'은 과거 2년치 지급 주기를 분석하여 추정한 날짜입니다.")
         else:
-            st.info("📌 현재 기준(오늘 이후)으로 야후 파이낸스에 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
+            st.info("📌 현재 기준(오늘 이후)으로 다가오는 배당락일/이벤트 일정이 없습니다.")
         st.markdown("---")
 
         if expected_records:
@@ -736,9 +744,9 @@ else:
                 .map(highlight_status, subset=['상태']),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 정보는 FXStreet 실시간 데이터를 기반으로 5분마다 최신화됩니다.")
+            st.caption("※ 정보는 ForexFactory 데이터를 기반으로 최신화됩니다.")
         else:
-            st.info("이번 주 예정된 주요 지표가 없거나, 데이터 서버 지연으로 불러올 수 없습니다.")
+            st.info("이번 주 예정된 주요 지표가 없거나, 외부 데이터 서버 지연으로 불러올 수 없습니다.")
 
     with tab_rebal:
         if target_cash >= 0 and total_asset > 0:
