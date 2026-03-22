@@ -36,7 +36,7 @@ if target_cash < 0:
 else:
     st.sidebar.info(f"💵 현금 비중: {target_cash}%\n(합계 100% 자동 계산)")
 
-# 🚀 [요청 반영] 투자 전략 (낙폭 기준표) 사이드바 토글 버튼
+# 🚀 투자 전략 사이드바 토글 버튼
 st.sidebar.markdown("---")
 show_drawdown_table = st.sidebar.toggle("📊 주요 지수 ETF 낙폭 기준표 보기", value=False)
 
@@ -345,7 +345,7 @@ def get_economic_calendar():
     except: return pd.DataFrame()
 
 # 🚀 [요청 반영] 최고가 및 낙폭 기준표 데이터 엔진
-@st.cache_data(ttl=86400) # 최고가는 하루 1회 캐싱
+@st.cache_data(ttl=86400)
 def fetch_high_prices(tickers_tuple):
     high_prices = {}
     for ticker in tickers_tuple:
@@ -374,7 +374,9 @@ def create_drawdown_table(current_prices, high_prices):
         "000660.KS": "하이닉스",
         "GLD": "금 (GLD)"
     }
-    levels = [-10, -15, -20, -25, -30, -35]
+    
+    # 💡 [요청 반영] -5% 추가 및 구간 확장
+    levels = [-5, -10, -15, -20, -25, -30, -35, -40]
     
     def format_price(val, ticker):
         return f"{val:,.0f}" if ticker.endswith('.KS') else f"${val:,.2f}"
@@ -404,25 +406,32 @@ def create_drawdown_table(current_prices, high_prices):
 def style_drawdown_table(df):
     def get_styles(data):
         styles_df = pd.DataFrame('', index=data.index, columns=data.columns)
-        levels = [-10, -15, -20, -25, -30, -35]
+        levels = [-5, -10, -15, -20, -25, -30, -35, -40]
+        
         for i in range(len(data)):
             curr = data.loc[i, '_curr_raw']
             high = data.loc[i, '_high_raw']
-            target_col = None
-            # 가격이 높은(-10%) 레벨부터 순차적으로 체크
+            
+            # 💡 [요청 반영] 현재가와 '가장 근사한 수치'를 수학적으로 계산하여 찾기
+            closest_col = None
+            min_diff = float('inf')
+            
             for l in levels:
                 col = f"{l}%"
                 level_price = high * (1 + l/100)
-                if curr <= level_price:
-                    target_col = col
-                else:
-                    break
+                diff = abs(curr - level_price)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_col = col
             
-            # 해당하는 낙폭 레벨의 셀 배경을 빨간색으로 시각화 (이미지의 빨간 점 대체)
-            if target_col and target_col in styles_df.columns:
-                styles_df.loc[i, target_col] = 'background-color: #E63946; color: white; font-weight: bold; border-radius: 4px;'
+            # 찾은 가장 근사한 타점에 빨간색 하이라이트 (무조건 1개 표시)
+            if closest_col and closest_col in styles_df.columns:
+                styles_df.loc[i, closest_col] = 'background-color: #E63946; color: white; font-weight: bold; border-radius: 4px;'
             
+            # 💡 [요청 반영] 하락률과 '현재가'를 파란색으로 뚜렷하게 차별화
             styles_df.loc[i, '하락률'] = 'font-weight: bold; color: #457B9D;'
+            styles_df.loc[i, '현재가'] = 'color: #3A86FF; font-weight: bold; background-color: rgba(58, 134, 255, 0.05);' # 진한 파란색 글씨 + 연한 파란색 배경
+            
         return styles_df.drop(columns=['_curr_raw', '_high_raw'])
         
     display_df = df.drop(columns=['_curr_raw', '_high_raw'])
@@ -546,7 +555,7 @@ else:
     </div>
     """, unsafe_allow_html=True)
 
-    # 🚀 [요청 반영] 주요 지수 낙폭 기준표 (투자 전략 - 사이드바 토글 시 표시)
+    # 📊 주요 지수 낙폭 기준표 렌더링
     if show_drawdown_table:
         st.markdown("**📊 주요 지수 ETF 낙폭 기준표 (투자 전략)**")
         with st.spinner("최근 1년 최고가 데이터를 분석 중입니다..."):
@@ -559,7 +568,7 @@ else:
             if not drawdown_df.empty:
                 styled_drawdown_df = style_drawdown_table(drawdown_df)
                 st.dataframe(styled_drawdown_df, use_container_width=True, hide_index=True)
-                st.caption("※ 붉은색 강조 셀은 현재 주가가 도달/돌파한 낙폭 구간을 의미합니다. (저점 매수 타점 참고)")
+                st.caption("※ 붉은색 강조 셀은 현재 주가와 가장 근접한 낙폭 구간(타점)을 자동으로 계산하여 표시합니다.")
             else:
                 st.info("데이터를 불러올 수 없습니다.")
         st.markdown("---")
@@ -647,7 +656,7 @@ else:
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
         else:
-            st.info("📌 현재 기준(오늘 이후)으로 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
+            st.info("📌 현재 기준(오늘 이후)으로 야후 파이낸스에 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
         st.markdown("---")
 
         if expected_records:
