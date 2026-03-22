@@ -21,7 +21,7 @@ is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
 auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
 st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
-# 🚀 5대 자산군 리밸런싱 사이드바 (현금 100% 자동 맞춤)
+# 🚀 5대 자산군 리밸런싱 사이드바
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
 target_stock = st.sidebar.number_input("📈 주식 비중 (%)", min_value=0, max_value=100, value=50, step=1)
@@ -35,6 +35,10 @@ if target_cash < 0:
     st.sidebar.error(f"⚠️ 합계가 100%를 초과했습니다! (초과분: {abs(target_cash)}%)")
 else:
     st.sidebar.info(f"💵 현금 비중: {target_cash}%\n(합계 100% 자동 계산)")
+
+# 🚀 [요청 반영] 투자 전략 (낙폭 기준표) 사이드바 토글 버튼
+st.sidebar.markdown("---")
+show_drawdown_table = st.sidebar.toggle("📊 주요 지수 ETF 낙폭 기준표 보기", value=False)
 
 st.markdown("<h2 style='margin-top: -15px;'>💎 내 포트폴리오</h2>", unsafe_allow_html=True)
 
@@ -114,7 +118,6 @@ def save_macro_settings(selected):
         with open(SETTINGS_FILE, "w") as f: json.dump({"indicators": selected}, f)
     except: pass
 
-# 🚀 [업데이트 완료] 야후 파이낸스 실시간 초고속 통신망 (0초 딜레이 반영)
 def fetch_single_macro(name, info):
     try:
         if info["src"] == "naver_index":
@@ -143,7 +146,6 @@ def fetch_single_macro(name, info):
                 return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
             return name, None
         elif info["src"] == "yahoo":
-            # Yfinance 라이브러리를 아예 버리고 야후 내부 API 직접 타격! (0초 딜레이 반영)
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             res = requests.get(url, headers=headers, timeout=5)
@@ -198,7 +200,6 @@ def fetch_single_price(ticker):
             data = res.json()['datas'][0]
             return ticker, float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
         
-        # 포트폴리오 미국 주식도 야후 API 직접 타격 (0초 딜레이)
         url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2d&interval=1m"
         headers = {'User-Agent': 'Mozilla/5.0'}
         res = requests.get(url, headers=headers, timeout=5)
@@ -249,7 +250,6 @@ def get_all_dividend_history(tickers_tuple):
             results[ticker] = {"divs": divs, "ex_date": ex_date}
     return results
 
-# 🚀 [업데이트] 경제 지표 AI 퀵해석 함수 (집계중 로직 추가 반영)
 def interpret_indicator(title, actual, forecast):
     if not actual or str(actual) == '-': return "⏳ 발표 대기중"
     if not forecast or str(forecast) == '-': return "➖ 단순 발표 (예상치 없음)"
@@ -266,7 +266,7 @@ def interpret_indicator(title, actual, forecast):
         if diff > 0: return "🔻 예상 상회 (인플레 우려/악재)"
         elif diff < 0: return "🔺 예상 하회 (인플레 둔화/호재)"
         else: return "➖ 예상 부합"
-    elif any(w in t for w in ["gdp", "pmi", "payroll", "employment", "주문", "판매", "sales", "생산", "manufacturing", "sentiment"]):
+    elif any(w in t for w in ["gdp", "pmi", "payroll", "employment", "주문", "판매", "sales", "생산", "manufacturing", "sentiment", "confidence"]):
         if diff > 0: return "🔺 예상 상회 (경제 탄탄/호재)"
         elif diff < 0: return "🔻 예상 하회 (경제 부진/악재)"
         else: return "➖ 예상 부합"
@@ -282,42 +282,54 @@ def interpret_indicator(title, actual, forecast):
 @st.cache_data(ttl=300) 
 def get_economic_calendar():
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Referer': 'https://www.forexfactory.com/', 'Origin': 'https://www.forexfactory.com/'}
-        res = requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json", headers=headers, timeout=5)
-        if res.status_code != 200: return pd.DataFrame()
-        
-        events = res.json()
         kst = pytz.timezone('Asia/Seoul')
         now = datetime.datetime.now(kst)
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        start_str = (now_utc - datetime.timedelta(days=3)).strftime('%Y-%m-%dT00:00:00Z')
+        end_str = (now_utc + datetime.timedelta(days=3)).strftime('%Y-%m-%dT23:59:59Z')
+        
+        url = f"https://calendar-api.fxstreet.com/en/api/v1/eventDates/{start_str}/{end_str}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        if res.status_code != 200: return pd.DataFrame()
+        events = res.json()
         
         records = []
         for ev in events:
-            if ev.get('country') not in ['USD', 'KRW']: continue
-            if ev.get('impact') not in ['High', 'Medium']: continue
+            country = ev.get('countryCode', '')
+            if country not in ['US', 'KR']: continue
+            volatility = ev.get('volatility', '')
+            if volatility not in ['HIGH', 'MEDIUM']: continue
+            
+            date_utc_str = ev.get('dateUtc')
+            if not date_utc_str: continue
+            
             try:
-                ev_dt = datetime.datetime.fromisoformat(ev['date']).astimezone(kst)
+                ev_dt = datetime.datetime.strptime(date_utc_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.utc).astimezone(kst)
                 
+                title = ev.get('name', '')
                 actual = str(ev.get('actual', '')).strip()
-                forecast = str(ev.get('forecast', '')).strip()
+                forecast = str(ev.get('consensus', '')).strip()
                 previous = str(ev.get('previous', '')).strip()
                 
-                if not actual: actual = '-'
-                if not forecast: forecast = '-'
-                if not previous: previous = '-'
+                if not actual or actual == 'None': actual = '-'
+                if not forecast or forecast == 'None': forecast = '-'
+                if not previous or previous == 'None': previous = '-'
                 
                 if ev_dt <= now:
                     status = "🔄 집계중" if actual == '-' else "✅ 완료"
                 else:
                     status = "⏳ 예정"
                     
-                title = ev.get('title', '')
                 interpretation = interpret_indicator(title, actual, forecast)
                 
                 records.append({
                     "상태": status,
                     "일시": ev_dt.strftime('%m-%d %H:%M'),
-                    "국가": "🇺🇸 USD" if ev.get('country') == 'USD' else "🇰🇷 KRW",
-                    "중요도": "🔥 높음" if ev.get('impact') == 'High' else "⭐ 중간",
+                    "국가": "🇺🇸 USD" if country == 'US' else "🇰🇷 KRW",
+                    "중요도": "🔥 높음" if volatility == 'HIGH' else "⭐ 중간",
                     "지표명": title,
                     "실제": actual,
                     "예상": forecast,
@@ -325,18 +337,21 @@ def get_economic_calendar():
                     "AI 해석": interpretation
                 })
             except: continue
-        return pd.DataFrame(records)
+            
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = df.sort_values(by="일시", ascending=False)
+        return df
     except: return pd.DataFrame()
 
-# 🚀 [요청 반영] 최고가 및 낙폭 기준표 계산 함수
-@st.cache_data(ttl=86400) # 최고가 데이터는 하루에 한 번만 캐싱
+# 🚀 [요청 반영] 최고가 및 낙폭 기준표 데이터 엔진
+@st.cache_data(ttl=86400) # 최고가는 하루 1회 캐싱
 def fetch_high_prices(tickers_tuple):
     high_prices = {}
     for ticker in tickers_tuple:
         try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="1y") # 1년 최고가 기준
-            high_prices[ticker] = hist['High'].max()
+            hist = yf.Ticker(ticker).history(period="1y")
+            high_prices[ticker] = float(hist['High'].max())
         except: high_prices[ticker] = 0.0
     return high_prices
 
@@ -349,74 +364,71 @@ def fetch_current_prices_for_drawdown(tickers_tuple):
             current_prices[ticker] = price
     return current_prices
 
-# 🚀 [요청 반영] 낙폭 기준표 생성 및 시각화 함수
-def create_drawdown_table(current_prices, high_prices, theme):
+def create_drawdown_table(current_prices, high_prices):
     drawdown_data = []
     tickers_map = {
         "SPY": "S&P (SPY)",
         "QQQ": "나스닥 (QQQ)",
         "MAGS": "빅7 (MAGS)",
         "SOXX": "반도체 (SOXX)",
-        "000660.KS": "하이닉스 (000660.KS)",
+        "000660.KS": "하이닉스",
         "GLD": "금 (GLD)"
     }
+    levels = [-10, -15, -20, -25, -30, -35]
     
+    def format_price(val, ticker):
+        return f"{val:,.0f}" if ticker.endswith('.KS') else f"${val:,.2f}"
+
     for ticker, name in tickers_map.items():
         curr_price = current_prices.get(ticker, 0.0)
         high_price = high_prices.get(ticker, 0.0)
-        
-        if curr_price == 0.0 or high_price == 0.0: continue
+        if high_price == 0.0: continue
         
         drawdown_pct = ((curr_price - high_price) / high_price) * 100
-        
-        levels = [-10, -15, -20, -25, -30, -35, -40, -45, -50]
-        level_prices = {f"{abs(l)}%": high_price * (1 + l/100) for l in levels}
         
         record = {
             "티커": ticker,
             "종목": name,
-            "현재 낙폭": f"{drawdown_pct:.1f}%",
-            "현재가": f"{curr_price:,.2f}"
+            "하락률": f"{drawdown_pct:.1f}%",
+            "현재가": format_price(curr_price, ticker),
         }
-        record.update({f"{abs(l)}% 낙폭 가격": f"{p:,.2f}" for l, p in level_prices.items()})
-        record.update({f"{abs(l)}%": p for l, p in level_prices.items()}) # 시각화를 위한 원본 가격
-        record["원본 현재가"] = curr_price # 시각화를 위한 원본 가격
+        for l in levels:
+            record[f"{l}%"] = format_price(high_price * (1 + l/100), ticker)
+            
+        record["_curr_raw"] = curr_price
+        record["_high_raw"] = high_price
         drawdown_data.append(record)
         
     return pd.DataFrame(drawdown_data)
 
-def style_drawdown_table(df, theme):
-    # 이미지의 '빨간 점' 기능을 스타일링으로 구현 (현재 가격이 속한 구간 강조)
-    def highlight_current_pos(row):
-        styles = [''] * len(row)
-        curr_price = row['원본 현재가']
-        levels = {col: row[col] for col in df.columns if col.endswith('%') and col != '현재 낙폭'}
+def style_drawdown_table(df):
+    def get_styles(data):
+        styles_df = pd.DataFrame('', index=data.index, columns=data.columns)
+        levels = [-10, -15, -20, -25, -30, -35]
+        for i in range(len(data)):
+            curr = data.loc[i, '_curr_raw']
+            high = data.loc[i, '_high_raw']
+            target_col = None
+            # 가격이 높은(-10%) 레벨부터 순차적으로 체크
+            for l in levels:
+                col = f"{l}%"
+                level_price = high * (1 + l/100)
+                if curr <= level_price:
+                    target_col = col
+                else:
+                    break
+            
+            # 해당하는 낙폭 레벨의 셀 배경을 빨간색으로 시각화 (이미지의 빨간 점 대체)
+            if target_col and target_col in styles_df.columns:
+                styles_df.loc[i, target_col] = 'background-color: #E63946; color: white; font-weight: bold; border-radius: 4px;'
+            
+            styles_df.loc[i, '하락률'] = 'font-weight: bold; color: #457B9D;'
+        return styles_df.drop(columns=['_curr_raw', '_high_raw'])
         
-        # 현재 가격이 어떤 낙폭 단계 사이에 있는지 확인
-        sorted_levels = sorted(levels.items(), key=lambda x: x[1], reverse=True) # 가격 높은 순으로 정렬
-        
-        current_level_col = ''
-        for col, price in sorted_levels:
-            if curr_price >= price:
-                current_level_col = col
-                break
-        if not current_level_col and sorted_levels: current_level_col = sorted_levels[-1][0] # 가장 낮은 가격보다도 낮으면 마지막 레벨로
-        
-        if current_level_col:
-            # 해당 레벨 컬럼의 배경색을 빨간색으로 변경
-            idx = df.columns.get_loc(current_level_col)
-            if idx < len(styles):
-                styles[idx] = 'background-color: rgba(230, 57, 70, 0.5); font-weight: bold;' # profit_up_color 계열
-        return styles
-    
-    # 원본 가격 컬럼 및 현재가 컬럼 제거 (시각화 후)
-    styled_df = df.drop(columns=[col for col in df.columns if col.endswith('%') and col != '현재 낙폭']).drop(columns=['원본 현재가'])
-    return styled_df.style.apply(highlight_current_pos, axis=1)
+    display_df = df.drop(columns=['_curr_raw', '_high_raw'])
+    return display_df.style.apply(lambda x: get_styles(df), axis=None).set_properties(**{'text-align': 'center'})
 
-# --- 사이드바 추가 기능 ---
-st.sidebar.markdown("---")
-# 🚀 [요청 반영] 투자 전략 버튼 추가
-show_drawdown_table = st.sidebar.toggle("📊 주요 지수 낙폭 기준표 (투자 전략)", value=False)
+# -------------------------- UI 렌더링 --------------------------
 
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
@@ -534,6 +546,24 @@ else:
     </div>
     """, unsafe_allow_html=True)
 
+    # 🚀 [요청 반영] 주요 지수 낙폭 기준표 (투자 전략 - 사이드바 토글 시 표시)
+    if show_drawdown_table:
+        st.markdown("**📊 주요 지수 ETF 낙폭 기준표 (투자 전략)**")
+        with st.spinner("최근 1년 최고가 데이터를 분석 중입니다..."):
+            tickers_tuple = ("SPY", "QQQ", "MAGS", "SOXX", "000660.KS", "GLD")
+            high_prices = fetch_high_prices(tickers_tuple)
+            current_prices = fetch_current_prices_for_drawdown(tickers_tuple)
+            
+            drawdown_df = create_drawdown_table(current_prices, high_prices)
+            
+            if not drawdown_df.empty:
+                styled_drawdown_df = style_drawdown_table(drawdown_df)
+                st.dataframe(styled_drawdown_df, use_container_width=True, hide_index=True)
+                st.caption("※ 붉은색 강조 셀은 현재 주가가 도달/돌파한 낙폭 구간을 의미합니다. (저점 매수 타점 참고)")
+            else:
+                st.info("데이터를 불러올 수 없습니다.")
+        st.markdown("---")
+
     if target_cash >= 0 and total_asset > 0:
         asset_classes = {"주식": 0.0, "코인": 0.0, "원자재": 0.0, "채권": 0.0, "현금": 0.0}
         for _, row in holdings.iterrows():
@@ -555,79 +585,8 @@ else:
 
     st.markdown("---")
 
-    st.markdown("**📊 포트폴리오 시각화**")
-    tab_chart1, tab_chart2, tab_chart3, tab_rebal = st.tabs(["🥧 자산 비중", "📈 자산 추이", "📊 실현 손익", "⚖️ 리밸런싱 계산기"])
-
-    with tab_chart1:
-        pc1, pc2 = st.columns(2)
-        text_font_setting = dict(color='black', size=20, family="sans-serif")
-        with pc1:
-            fig1 = px.pie(holdings.groupby('자산군')['평가액(만원)'].sum().reset_index(), values='평가액(만원)', names='자산군', hole=0.4, color_discrete_sequence=pastel_colors)
-            fig1.update_traces(textposition='inside', texttemplate='<b>%{label}</b><br><b>%{percent:.1%}</b>', textfont=text_font_setting)
-            fig1.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', showlegend=False, margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig1, use_container_width=True)
-        with pc2:
-            holdings_positive = holdings[holdings['평가액(만원)'] > 0].copy()
-            if not holdings_positive.empty:
-                fig_sun = px.sunburst(holdings_positive, path=['자산군', '종목명'], values='평가액(만원)', color_discrete_sequence=pastel_colors)
-                fig_sun.update_traces(textinfo='label+percent entry', textfont=dict(color='black', size=15))
-                fig_sun.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
-                st.plotly_chart(fig_sun, use_container_width=True)
-
-    with tab_chart2:
-        if not df_history.empty and df_history.shape[1] >= 2:
-            df_history['총자산(만원)'] = pd.to_numeric(df_history[df_history.columns[1]], errors='coerce').fillna(0) / 10000
-            fig_line = px.line(df_history, x='날짜', y='총자산(만원)', markers=True)
-            fig_line.update_traces(line_color=line_color, marker_color=line_color)
-            fig_line.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig_line, use_container_width=True)
-
-    with tab_chart3:
-        if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
-            df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
-            df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x.get('분류', '')).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
-            df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'해외' if x.get('통화')=='USD' else '국내'})", axis=1)
-            df_pnl['실현손익_차트용(만원)'] = (df_pnl['실현손익(원)'] / 10000).fillna(0).astype(int)
-            
-            period = st.radio("보기 옵션", ["월별", "연별", "일별"], horizontal=True, label_visibility="collapsed")
-            df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'], errors='coerce')
-            df_pnl = df_pnl.dropna(subset=['날짜'])
-            df_pnl['일자'], df_pnl['월'], df_pnl['연'] = df_pnl['날짜'].dt.strftime('%m-%d'), df_pnl['날짜'].dt.strftime('%Y-%m'), df_pnl['날짜'].dt.strftime('%Y')
-            
-            def plot_pnl_bar(data, x_col):
-                color_map = {'매도 (국내)': '#FF6B6B', '매도 (해외)': '#FFA07A', '배당 (국내)': '#4DABF7', '배당 (해외)': '#51CF66'}
-                fig = px.bar(data, x=x_col, y='실현손익_차트용(만원)', color='차트분류', text='실현손익_차트용(만원)', color_discrete_map=color_map)
-                fig.update_traces(texttemplate='%{text:,.0f}', textposition="outside", cliponaxis=False)
-                fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
-                st.plotly_chart(fig, use_container_width=True)
-
-            if period == "월별": plot_pnl_bar(df_pnl.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '월')
-            elif period == "연별": plot_pnl_bar(df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '연')
-            else: plot_pnl_bar(df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '일자')
-    
-    with tab_rebal:
-        if target_cash >= 0 and total_asset > 0:
-            st.markdown("<div style='font-size: 13px; color: gray; margin-bottom: 10px;'>💡 사이드바에서 설정한 목표 비중으로 맞추기 위한 매매 지침입니다.</div>", unsafe_allow_html=True)
-            def style_rebal(val):
-                if isinstance(val, str):
-                    if "매수" in val: return f'color: {profit_up_color}; font-weight: bold;'
-                    elif "매도" in val: return f'color: {profit_down_color}; font-weight: bold;'
-                return ''
-            st.dataframe(
-                rebal_df.style
-                .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px', 'text-align': 'center'})
-                .format({'현재 비중': '{:.1f}%', '목표 비중': '{:.1f}%', '현재액(원)': '{:,.0f}', '목표액(원)': '{:,.0f}', '필요 금액(원)': '{:,.0f}'})
-                .map(style_rebal, subset=['Action']),
-                use_container_width=True, hide_index=True
-            )
-        else:
-            st.caption("좌측 ⚙️ 사이드바를 열어 목표 자산 비중 수치를 올바르게 입력해 주세요.")
-
-    st.markdown("---")
-
     st.markdown("**📋 상세 데이터**")
-    
-    tab_data1, tab_data3, tab_data4 = st.tabs(["📊 자산 상세", "🔮 향후 배당 & 이벤트 캘린더", "📅 글로벌 경제 지표"])
+    tab_data1, tab_data3, tab_data4, tab_rebal = st.tabs(["📊 자산 상세", "🔮 이벤트 캘린더", "📅 글로벌 경제 지표", "⚖️ 리밸런싱 계산기"])
 
     with tab_data1:
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
@@ -688,7 +647,7 @@ else:
             cal_df = pd.DataFrame(calendar_records).sort_values("날짜", ascending=True)
             st.dataframe(cal_df.style.set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '13px'}), use_container_width=True, hide_index=True)
         else:
-            st.info("📌 현재 기준(오늘 이후)으로 야후 파이낸스에 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
+            st.info("📌 현재 기준(오늘 이후)으로 공식 발표된 다가오는 배당락일/이벤트 일정이 없습니다.")
         st.markdown("---")
 
         if expected_records:
@@ -715,48 +674,27 @@ else:
                 .map(highlight_status, subset=['상태']),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 정보는 포렉스팩토리 데이터를 기반으로 5분마다 최신화됩니다.")
+            st.caption("※ 정보는 FXStreet 실시간 데이터를 기반으로 5분마다 최신화됩니다.")
         else:
             st.info("이번 주 예정된 주요 지표가 없거나, 데이터 서버 지연으로 불러올 수 없습니다.")
 
-# 🚀 [업데이트 완료] QQQ 최고가 및 현재 낙폭 계산 (대시보드 하단 전략용)
-kst = pytz.timezone('Asia/Seoul')
-now = datetime.datetime.now(kst)
-today_str = now.strftime('%Y-%m-%d')
-
-# QQQ 최고가 및 현재 낙폭 계산
-qqq_ticker = "QQQ"
-qqq_high_price = yf.Ticker(qqq_ticker).history(period="1y")['High'].max()
-qqq_curr_price = get_current_price(qqq_ticker)
-qqq_drawdown_pct = ((qqq_curr_price - qqq_high_price) / qqq_high_price) * 100
-
-# ⚠️ [요청 반영] QQQ 고점 근처 안내 문구
-if abs(qqq_drawdown_pct) < 3.0:
-    st.warning("⚠️ 현재 QQQ가 고점 근처(고점 대비 낙폭 3% 미만)입니다. 투자에 유의하세요. (투자 전략 수립 시 참고)")
-
-# 📊 [요청 반영] 주요 지수 낙폭 기준표 (투자 전략)
-if show_drawdown_table:
-    st.markdown("**📊 주요 지수 낙폭 기준표 (투자 전략)**")
-    with st.spinner("데이터를 분석 중입니다..."):
-        tickers_tuple = ("SPY", "QQQ", "MAGS", "SOXX", "000660.KS", "GLD")
-        high_prices = fetch_high_prices(tickers_tuple)
-        current_prices = fetch_current_prices_for_drawdown(tickers_tuple)
-        
-        drawdown_df = create_drawdown_table(current_prices, high_prices, chart_template)
-        
-        if not drawdown_df.empty:
-            # 스타일링 적용 (빨간색 테마로 현재 가격 위치 시각화)
-            styled_drawdown_df = style_drawdown_table(drawdown_df, chart_template)
-            
-            # 표 표시
-            st.dataframe(styled_drawdown_df, use_container_width=True, hide_index=True)
-            
-            # 안내 문구
-            st.caption(f"※ 최고가는 최근 1년 기준이며, 하락 시 지지선 확인 및 비교 투자 전략 수립에 활용할 수 있습니다. 빨간색 테마는 현재 가격 위치를 의미합니다.")
-            st.caption("※ 빨간색 강조 표시는 사용자가 참고한 그림의 빨간 점 기능을 구현한 것입니다.")
+    with tab_rebal:
+        if target_cash >= 0 and total_asset > 0:
+            st.markdown("<div style='font-size: 13px; color: gray; margin-bottom: 10px;'>💡 사이드바에서 설정한 목표 비중으로 맞추기 위한 매매 지침입니다.</div>", unsafe_allow_html=True)
+            def style_rebal(val):
+                if isinstance(val, str):
+                    if "매수" in val: return f'color: {profit_up_color}; font-weight: bold;'
+                    elif "매도" in val: return f'color: {profit_down_color}; font-weight: bold;'
+                return ''
+            st.dataframe(
+                rebal_df.style
+                .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px', 'text-align': 'center'})
+                .format({'현재 비중': '{:.1f}%', '목표 비중': '{:.1f}%', '현재액(원)': '{:,.0f}', '목표액(원)': '{:,.0f}', '필요 금액(원)': '{:,.0f}'})
+                .map(style_rebal, subset=['Action']),
+                use_container_width=True, hide_index=True
+            )
         else:
-            st.info("데이터를 불러올 수 없습니다.")
-    st.markdown("---")
+            st.caption("좌측 ⚙️ 사이드바를 열어 목표 자산 비중 수치를 올바르게 입력해 주세요.")
 
 if auto_refresh:
     time.sleep(30)
