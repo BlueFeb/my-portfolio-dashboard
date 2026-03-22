@@ -101,11 +101,12 @@ INDICATORS_CONFIG = {
 
 SETTINGS_FILE = "macro_settings.json"
 
+# 🚀 [버그 픽스 완료] utf-8 인코딩 명시로 한글/이모티콘 깨짐 방지 및 영구 저장 보장
 def load_macro_settings():
     default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇰🇷 코스피", "🇺🇸 US Tech 100 선물", "💱 원/달러", "💎 비트코인"]
     try:
         if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, "r") as f:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 saved = data.get("indicators", [])
                 valid_saved = [x for x in saved if x in INDICATORS_CONFIG]
@@ -115,7 +116,8 @@ def load_macro_settings():
 
 def save_macro_settings(selected):
     try:
-        with open(SETTINGS_FILE, "w") as f: json.dump({"indicators": selected}, f)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"indicators": selected}, f, ensure_ascii=False)
     except: pass
 
 def fetch_single_macro(name, info):
@@ -344,7 +346,6 @@ def get_economic_calendar():
         return df
     except: return pd.DataFrame()
 
-# 🚀 [요청 반영] 최고가 및 낙폭 기준표 데이터 엔진
 @st.cache_data(ttl=86400)
 def fetch_high_prices(tickers_tuple):
     high_prices = {}
@@ -375,7 +376,6 @@ def create_drawdown_table(current_prices, high_prices):
         "GLD": "금 (GLD)"
     }
     
-    # 💡 [요청 반영] -5% 추가 및 구간 확장
     levels = [-5, -10, -15, -20, -25, -30, -35, -40]
     
     def format_price(val, ticker):
@@ -384,7 +384,7 @@ def create_drawdown_table(current_prices, high_prices):
     for ticker, name in tickers_map.items():
         curr_price = current_prices.get(ticker, 0.0)
         high_price = high_prices.get(ticker, 0.0)
-        if high_price == 0.0: continue
+        if high_price == 0.0 or curr_price == 0.0: continue
         
         drawdown_pct = ((curr_price - high_price) / high_price) * 100
         
@@ -412,7 +412,6 @@ def style_drawdown_table(df):
             curr = data.loc[i, '_curr_raw']
             high = data.loc[i, '_high_raw']
             
-            # 💡 [요청 반영] 현재가와 '가장 근사한 수치'를 수학적으로 계산하여 찾기
             closest_col = None
             min_diff = float('inf')
             
@@ -424,13 +423,11 @@ def style_drawdown_table(df):
                     min_diff = diff
                     closest_col = col
             
-            # 찾은 가장 근사한 타점에 빨간색 하이라이트 (무조건 1개 표시)
             if closest_col and closest_col in styles_df.columns:
                 styles_df.loc[i, closest_col] = 'background-color: #E63946; color: white; font-weight: bold; border-radius: 4px;'
             
-            # 💡 [요청 반영] 하락률과 '현재가'를 파란색으로 뚜렷하게 차별화
             styles_df.loc[i, '하락률'] = 'font-weight: bold; color: #457B9D;'
-            styles_df.loc[i, '현재가'] = 'color: #3A86FF; font-weight: bold; background-color: rgba(58, 134, 255, 0.05);' # 진한 파란색 글씨 + 연한 파란색 배경
+            styles_df.loc[i, '현재가'] = 'color: #3A86FF; font-weight: bold; background-color: rgba(58, 134, 255, 0.05);' 
             
         return styles_df.drop(columns=['_curr_raw', '_high_raw'])
         
@@ -555,7 +552,6 @@ else:
     </div>
     """, unsafe_allow_html=True)
 
-    # 📊 주요 지수 낙폭 기준표 렌더링
     if show_drawdown_table:
         st.markdown("**📊 주요 지수 ETF 낙폭 기준표 (투자 전략)**")
         with st.spinner("최근 1년 최고가 데이터를 분석 중입니다..."):
@@ -568,7 +564,7 @@ else:
             if not drawdown_df.empty:
                 styled_drawdown_df = style_drawdown_table(drawdown_df)
                 st.dataframe(styled_drawdown_df, use_container_width=True, hide_index=True)
-                st.caption("※ 붉은색 강조 셀은 현재 주가와 가장 근접한 낙폭 구간(타점)을 자동으로 계산하여 표시합니다.")
+                st.caption("※ 파란색 텍스트는 '현재가'이며, 붉은색 강조 셀은 현재 주가와 가장 근접한 낙폭 구간(타점)을 자동으로 찾아 표시합니다.")
             else:
                 st.info("데이터를 불러올 수 없습니다.")
         st.markdown("---")
