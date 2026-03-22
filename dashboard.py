@@ -92,6 +92,7 @@ INDICATORS_CONFIG = {
     "🥇 금 선물": {"ticker": "GC=F", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
     "📈 10년물 국채 금리": {"ticker": "^TNX", "src": "yahoo", "prefix": "", "suffix": "%", "inverse": True}, 
     "🥶 미국 VIX": {"ticker": "^VIX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": True},
+    "🥶 한국 VKOSPI": {"ticker": "^VKOSPI", "src": "naver_vkospi", "prefix": "", "suffix": "", "inverse": True},
 }
 
 SETTINGS_FILE = "macro_settings.json"
@@ -113,7 +114,7 @@ def save_macro_settings(selected):
         with open(SETTINGS_FILE, "w") as f: json.dump({"indicators": selected}, f)
     except: pass
 
-# 🚀 [업데이트] 야후 파이낸스 실시간 초고속 통신망 (0초 딜레이)
+# 🚀 [업데이트 완료] 야후 파이낸스 실시간 초고속 통신망 (0초 딜레이 반영)
 def fetch_single_macro(name, info):
     try:
         if info["src"] == "naver_index":
@@ -130,8 +131,19 @@ def fetch_single_macro(name, info):
             change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
             if change_pct < 0: change_val = -change_val
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+        elif info["src"] == "naver_vkospi":
+            res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+            curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
+            if curr_match:
+                curr = float(curr_match.group(1))
+                chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
+                change_val = float(chg_match.group(1)) if chg_match else 0.0
+                if "nv01" in res.text: change_val = -change_val
+                prev = curr - change_val
+                return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
+            return name, None
         elif info["src"] == "yahoo":
-            # Yfinance 라이브러리를 아예 버리고 야후 내부 API 직접 타격!
+            # Yfinance 라이브러리를 아예 버리고 야후 내부 API 직접 타격! (0초 딜레이 반영)
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             res = requests.get(url, headers=headers, timeout=5)
@@ -223,7 +235,7 @@ def fetch_single_dividend(ticker):
                 today_str = datetime.datetime.now(kst).strftime('%Y-%m-%d')
                 if ed_str >= today_str: ex_date = ed_str
         except: pass
-        divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in columns else pd.Series(dtype=float)
+        divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
         return ticker, divs, ex_date
     except: return ticker, pd.Series(dtype=float), None
 
@@ -237,7 +249,7 @@ def get_all_dividend_history(tickers_tuple):
             results[ticker] = {"divs": divs, "ex_date": ex_date}
     return results
 
-# 🚀 [업데이트] 경제 지표 AI 퀵해석 함수 (집계중 로직 추가)
+# 🚀 [업데이트] 경제 지표 AI 퀵해석 함수 (집계중 로직 추가 반영)
 def interpret_indicator(title, actual, forecast):
     if not actual or str(actual) == '-': return "⏳ 발표 대기중"
     if not forecast or str(forecast) == '-': return "➖ 단순 발표 (예상치 없음)"
@@ -315,6 +327,96 @@ def get_economic_calendar():
             except: continue
         return pd.DataFrame(records)
     except: return pd.DataFrame()
+
+# 🚀 [요청 반영] 최고가 및 낙폭 기준표 계산 함수
+@st.cache_data(ttl=86400) # 최고가 데이터는 하루에 한 번만 캐싱
+def fetch_high_prices(tickers_tuple):
+    high_prices = {}
+    for ticker in tickers_tuple:
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="1y") # 1년 최고가 기준
+            high_prices[ticker] = hist['High'].max()
+        except: high_prices[ticker] = 0.0
+    return high_prices
+
+def fetch_current_prices_for_drawdown(tickers_tuple):
+    current_prices = {}
+    with ThreadPoolExecutor(max_workers=len(tickers_tuple)) as executor:
+        futures = {executor.submit(fetch_single_price, t): t for t in tickers_tuple}
+        for future in as_completed(futures):
+            ticker, price, _ = future.result()
+            current_prices[ticker] = price
+    return current_prices
+
+# 🚀 [요청 반영] 낙폭 기준표 생성 및 시각화 함수
+def create_drawdown_table(current_prices, high_prices, theme):
+    drawdown_data = []
+    tickers_map = {
+        "SPY": "S&P (SPY)",
+        "QQQ": "나스닥 (QQQ)",
+        "MAGS": "빅7 (MAGS)",
+        "SOXX": "반도체 (SOXX)",
+        "000660.KS": "하이닉스 (000660.KS)",
+        "GLD": "금 (GLD)"
+    }
+    
+    for ticker, name in tickers_map.items():
+        curr_price = current_prices.get(ticker, 0.0)
+        high_price = high_prices.get(ticker, 0.0)
+        
+        if curr_price == 0.0 or high_price == 0.0: continue
+        
+        drawdown_pct = ((curr_price - high_price) / high_price) * 100
+        
+        levels = [-10, -15, -20, -25, -30, -35, -40, -45, -50]
+        level_prices = {f"{abs(l)}%": high_price * (1 + l/100) for l in levels}
+        
+        record = {
+            "티커": ticker,
+            "종목": name,
+            "현재 낙폭": f"{drawdown_pct:.1f}%",
+            "현재가": f"{curr_price:,.2f}"
+        }
+        record.update({f"{abs(l)}% 낙폭 가격": f"{p:,.2f}" for l, p in level_prices.items()})
+        record.update({f"{abs(l)}%": p for l, p in level_prices.items()}) # 시각화를 위한 원본 가격
+        record["원본 현재가"] = curr_price # 시각화를 위한 원본 가격
+        drawdown_data.append(record)
+        
+    return pd.DataFrame(drawdown_data)
+
+def style_drawdown_table(df, theme):
+    # 이미지의 '빨간 점' 기능을 스타일링으로 구현 (현재 가격이 속한 구간 강조)
+    def highlight_current_pos(row):
+        styles = [''] * len(row)
+        curr_price = row['원본 현재가']
+        levels = {col: row[col] for col in df.columns if col.endswith('%') and col != '현재 낙폭'}
+        
+        # 현재 가격이 어떤 낙폭 단계 사이에 있는지 확인
+        sorted_levels = sorted(levels.items(), key=lambda x: x[1], reverse=True) # 가격 높은 순으로 정렬
+        
+        current_level_col = ''
+        for col, price in sorted_levels:
+            if curr_price >= price:
+                current_level_col = col
+                break
+        if not current_level_col and sorted_levels: current_level_col = sorted_levels[-1][0] # 가장 낮은 가격보다도 낮으면 마지막 레벨로
+        
+        if current_level_col:
+            # 해당 레벨 컬럼의 배경색을 빨간색으로 변경
+            idx = df.columns.get_loc(current_level_col)
+            if idx < len(styles):
+                styles[idx] = 'background-color: rgba(230, 57, 70, 0.5); font-weight: bold;' # profit_up_color 계열
+        return styles
+    
+    # 원본 가격 컬럼 및 현재가 컬럼 제거 (시각화 후)
+    styled_df = df.drop(columns=[col for col in df.columns if col.endswith('%') and col != '현재 낙폭']).drop(columns=['원본 현재가'])
+    return styled_df.style.apply(highlight_current_pos, axis=1)
+
+# --- 사이드바 추가 기능 ---
+st.sidebar.markdown("---")
+# 🚀 [요청 반영] 투자 전략 버튼 추가
+show_drawdown_table = st.sidebar.toggle("📊 주요 지수 낙폭 기준표 (투자 전략)", value=False)
 
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
@@ -524,6 +626,7 @@ else:
     st.markdown("---")
 
     st.markdown("**📋 상세 데이터**")
+    
     tab_data1, tab_data3, tab_data4 = st.tabs(["📊 자산 상세", "🔮 향후 배당 & 이벤트 캘린더", "📅 글로벌 경제 지표"])
 
     with tab_data1:
@@ -612,9 +715,48 @@ else:
                 .map(highlight_status, subset=['상태']),
                 use_container_width=True, hide_index=True
             )
-            st.caption("※ 정보는 실시간 데이터를 기반으로 5분마다 최신화됩니다.")
+            st.caption("※ 정보는 포렉스팩토리 데이터를 기반으로 5분마다 최신화됩니다.")
         else:
             st.info("이번 주 예정된 주요 지표가 없거나, 데이터 서버 지연으로 불러올 수 없습니다.")
+
+# 🚀 [업데이트 완료] QQQ 최고가 및 현재 낙폭 계산 (대시보드 하단 전략용)
+kst = pytz.timezone('Asia/Seoul')
+now = datetime.datetime.now(kst)
+today_str = now.strftime('%Y-%m-%d')
+
+# QQQ 최고가 및 현재 낙폭 계산
+qqq_ticker = "QQQ"
+qqq_high_price = yf.Ticker(qqq_ticker).history(period="1y")['High'].max()
+qqq_curr_price = get_current_price(qqq_ticker)
+qqq_drawdown_pct = ((qqq_curr_price - qqq_high_price) / qqq_high_price) * 100
+
+# ⚠️ [요청 반영] QQQ 고점 근처 안내 문구
+if abs(qqq_drawdown_pct) < 3.0:
+    st.warning("⚠️ 현재 QQQ가 고점 근처(고점 대비 낙폭 3% 미만)입니다. 투자에 유의하세요. (투자 전략 수립 시 참고)")
+
+# 📊 [요청 반영] 주요 지수 낙폭 기준표 (투자 전략)
+if show_drawdown_table:
+    st.markdown("**📊 주요 지수 낙폭 기준표 (투자 전략)**")
+    with st.spinner("데이터를 분석 중입니다..."):
+        tickers_tuple = ("SPY", "QQQ", "MAGS", "SOXX", "000660.KS", "GLD")
+        high_prices = fetch_high_prices(tickers_tuple)
+        current_prices = fetch_current_prices_for_drawdown(tickers_tuple)
+        
+        drawdown_df = create_drawdown_table(current_prices, high_prices, chart_template)
+        
+        if not drawdown_df.empty:
+            # 스타일링 적용 (빨간색 테마로 현재 가격 위치 시각화)
+            styled_drawdown_df = style_drawdown_table(drawdown_df, chart_template)
+            
+            # 표 표시
+            st.dataframe(styled_drawdown_df, use_container_width=True, hide_index=True)
+            
+            # 안내 문구
+            st.caption(f"※ 최고가는 최근 1년 기준이며, 하락 시 지지선 확인 및 비교 투자 전략 수립에 활용할 수 있습니다. 빨간색 테마는 현재 가격 위치를 의미합니다.")
+            st.caption("※ 빨간색 강조 표시는 사용자가 참고한 그림의 빨간 점 기능을 구현한 것입니다.")
+        else:
+            st.info("데이터를 불러올 수 없습니다.")
+    st.markdown("---")
 
 if auto_refresh:
     time.sleep(30)
