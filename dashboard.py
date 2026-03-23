@@ -142,33 +142,37 @@ def save_macro_settings(selected):
             json.dump({"indicators": selected}, f, ensure_ascii=False)
     except: pass
 
+# 🚀 [완벽 수정] 네이버 API 증감액 부호 에러 방어 로직 (절대값 후 부호 할당)
 def fetch_single_macro(name, info):
     try:
-        if info["src"] == "naver_index":
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
+        if info["src"] in ["naver_index", "naver_stock"]:
+            api_type = "index" if info["src"] == "naver_index" else "stock"
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/{api_type}/{info['ticker']}", timeout=3)
             data = res.json()['datas'][0]
-            curr, change_pct = float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
-            change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
-            if change_pct < 0: change_val = -change_val
+            curr = float(data['closePrice'].replace(',', ''))
+            change_pct = float(data['fluctuationsRatio'])
+            
+            # API에서 어떻게 주든 무조건 절대값으로 만든 뒤, 퍼센트(%)의 부호를 따라가도록 락을 걺!
+            raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
+            change_val = abs(float(raw_change_val))
+            if change_pct < 0:
+                change_val = -change_val
+                
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-        elif info["src"] == "naver_stock":
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
-            data = res.json()['datas'][0]
-            curr, change_pct = float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
-            change_val = float(data['compareToPreviousClosePrice'].replace(',', ''))
-            if change_pct < 0: change_val = -change_val
-            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            
         elif info["src"] == "naver_vkospi":
             res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
             curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
             if curr_match:
                 curr = float(curr_match.group(1))
                 chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
-                change_val = float(chg_match.group(1)) if chg_match else 0.0
-                if "nv01" in res.text: change_val = -change_val
+                raw_val = float(chg_match.group(1)) if chg_match else 0.0
+                change_val = -raw_val if "nv01" in res.text else raw_val
                 prev = curr - change_val
-                return name, {"current": curr, "change_pct": (change_val / prev) * 100 if prev > 0 else 0.0, "change_val": change_val}
+                change_pct = (change_val / prev) * 100 if prev > 0 else 0.0
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
             return name, None
+            
         elif info["src"] == "yahoo":
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -176,7 +180,9 @@ def fetch_single_macro(name, info):
             meta = res.json()['chart']['result'][0]['meta']
             curr = float(meta['regularMarketPrice'])
             prev = float(meta['chartPreviousClose'])
-            if info["ticker"] == "JPYKRW=X": curr *= 100; prev *= 100
+            if info["ticker"] == "JPYKRW=X": 
+                curr *= 100
+                prev *= 100
             change_val = curr - prev
             change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
@@ -244,7 +250,6 @@ def get_all_market_data(tickers_tuple):
             results[ticker] = (price, change)
     return results
 
-# 🚀 [업데이트] 배당락일 공식 데이터 + AI 추정 기록 추가 반환
 def fetch_single_dividend(ticker):
     try:
         if not ticker or not isinstance(ticker, str) or ticker == "KRW=X": 
@@ -303,7 +308,6 @@ def interpret_indicator(title, actual, forecast):
     elif diff < 0: return "🔻 예상 하회"
     else: return "➖ 예상 부합"
 
-# 🚀 [업데이트] 차단율이 낮은 ForexFactory API로 복구 및 방어코드 강화
 @st.cache_data(ttl=300) 
 def get_economic_calendar():
     try:
@@ -679,7 +683,6 @@ else:
                     calendar_records.append({"종목명": name, "티커": ticker, "구분": "✅ 확정", "날짜": ex_date, "내용": "배당락일"})
                     added_to_calendar = True
                 
-                # 🚀 [업데이트] AI 배당락일 예측(Predict) 알고리즘
                 if not added_to_calendar and not divs.empty and last_div_date is not None:
                     try:
                         if len(divs) >= 18: days_to_add = 30
