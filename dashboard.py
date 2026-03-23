@@ -102,24 +102,25 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
+# 🚀 역방향(Inverse) 로직 삭제: 색상 렌더링 시 부호에 맞춰 통일되도록 설정
 INDICATORS_CONFIG = {
-    "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
-    "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": "", "inverse": False},
-    "🇰🇷 삼성전자": {"ticker": "005930", "src": "naver_stock", "prefix": "", "suffix": "원", "inverse": False},
-    "🇰🇷 SK하이닉스": {"ticker": "000660", "src": "naver_stock", "prefix": "", "suffix": "원", "inverse": False},
-    "🇺🇸 S&P 500 선물": {"ticker": "ES=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
-    "🇺🇸 US Tech 100 선물": {"ticker": "NQ=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
-    "🇺🇸 다우존스 선물": {"ticker": "YM=F", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
-    "💾 반도체 (SOX)": {"ticker": "^SOX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": False},
-    "💱 원/달러": {"ticker": "KRW=X", "src": "yahoo", "prefix": "", "suffix": "원", "inverse": False},
-    "💱 원/엔 (100엔)": {"ticker": "JPYKRW=X", "src": "yahoo", "prefix": "", "suffix": "원", "inverse": False},
-    "💎 비트코인": {"ticker": "BTC-USD", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
-    "💎 이더리움": {"ticker": "ETH-USD", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
-    "🛢️ WTI 원유": {"ticker": "CL=F", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
-    "🥇 금 선물": {"ticker": "GC=F", "src": "yahoo", "prefix": "$", "suffix": "", "inverse": False},
-    "📈 10년물 국채 금리": {"ticker": "^TNX", "src": "yahoo", "prefix": "", "suffix": "%", "inverse": True}, 
-    "🥶 미국 VIX": {"ticker": "^VIX", "src": "yahoo", "prefix": "", "suffix": "", "inverse": True},
-    "🥶 한국 VKOSPI": {"ticker": "^VKOSPI", "src": "naver_vkospi", "prefix": "", "suffix": "", "inverse": True},
+    "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": ""},
+    "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": ""},
+    "🇰🇷 삼성전자": {"ticker": "005930", "src": "naver_stock", "prefix": "", "suffix": "원"},
+    "🇰🇷 SK하이닉스": {"ticker": "000660", "src": "naver_stock", "prefix": "", "suffix": "원"},
+    "🇺🇸 S&P 500 선물": {"ticker": "ES=F", "src": "yahoo", "prefix": "", "suffix": ""},
+    "🇺🇸 US Tech 100 선물": {"ticker": "NQ=F", "src": "yahoo", "prefix": "", "suffix": ""},
+    "🇺🇸 다우존스 선물": {"ticker": "YM=F", "src": "yahoo", "prefix": "", "suffix": ""},
+    "💾 반도체 (SOX)": {"ticker": "^SOX", "src": "yahoo", "prefix": "", "suffix": ""},
+    "💱 원/달러": {"ticker": "KRW=X", "src": "yahoo", "prefix": "", "suffix": "원"},
+    "💱 원/엔 (100엔)": {"ticker": "JPYKRW=X", "src": "yahoo", "prefix": "", "suffix": "원"},
+    "💎 비트코인": {"ticker": "BTC-USD", "src": "yahoo", "prefix": "$", "suffix": ""},
+    "💎 이더리움": {"ticker": "ETH-USD", "src": "yahoo", "prefix": "$", "suffix": ""},
+    "🛢️ WTI 원유": {"ticker": "CL=F", "src": "yahoo", "prefix": "$", "suffix": ""},
+    "🥇 금 선물": {"ticker": "GC=F", "src": "yahoo", "prefix": "$", "suffix": ""},
+    "📈 10년물 국채 금리": {"ticker": "^TNX", "src": "yahoo", "prefix": "", "suffix": "%"}, 
+    "🥶 미국 VIX": {"ticker": "^VIX", "src": "yahoo", "prefix": "", "suffix": ""},
+    "🥶 한국 VKOSPI": {"ticker": "^VKOSPI", "src": "naver_vkospi", "prefix": "", "suffix": ""},
 }
 
 MACRO_SETTINGS_FILE = "macro_settings.json"
@@ -142,22 +143,26 @@ def save_macro_settings(selected):
             json.dump({"indicators": selected}, f, ensure_ascii=False)
     except: pass
 
-# 🚀 [완벽 수정] 네이버 API 증감액 부호 에러 방어 로직 (절대값 후 부호 할당)
 def fetch_single_macro(name, info):
     try:
-        if info["src"] in ["naver_index", "naver_stock"]:
-            api_type = "index" if info["src"] == "naver_index" else "stock"
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/{api_type}/{info['ticker']}", timeout=3)
+        if info["src"] == "naver_index":
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
             data = res.json()['datas'][0]
             curr = float(data['closePrice'].replace(',', ''))
             change_pct = float(data['fluctuationsRatio'])
-            
-            # API에서 어떻게 주든 무조건 절대값으로 만든 뒤, 퍼센트(%)의 부호를 따라가도록 락을 걺!
             raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
             change_val = abs(float(raw_change_val))
-            if change_pct < 0:
-                change_val = -change_val
-                
+            if change_pct < 0: change_val = -change_val
+            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            
+        elif info["src"] == "naver_stock":
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
+            data = res.json()['datas'][0]
+            curr = float(data['closePrice'].replace(',', ''))
+            change_pct = float(data['fluctuationsRatio'])
+            raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
+            change_val = abs(float(raw_change_val))
+            if change_pct < 0: change_val = -change_val
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
             
         elif info["src"] == "naver_vkospi":
@@ -175,14 +180,13 @@ def fetch_single_macro(name, info):
             
         elif info["src"] == "yahoo":
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
-            headers = {'User-Agent': 'Mozilla/5.0'}
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
             res = requests.get(url, headers=headers, timeout=5)
             meta = res.json()['chart']['result'][0]['meta']
             curr = float(meta['regularMarketPrice'])
             prev = float(meta['chartPreviousClose'])
             if info["ticker"] == "JPYKRW=X": 
-                curr *= 100
-                prev *= 100
+                curr *= 100; prev *= 100
             change_val = curr - prev
             change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
@@ -484,7 +488,10 @@ else:
         
         if data is not None:
             curr, d_val, d_pct = data["current"], data["change_val"], data["change_pct"]
-            color = profit_up_color if (d_val > 0 and not info["inverse"]) or (d_val < 0 and info["inverse"]) else profit_down_color if d_val != 0 else text_color
+            
+            # 🚀 [업데이트] 무조건 플러스(+)는 빨간색, 마이너스(-)는 파란색으로 통일!
+            color = profit_up_color if d_val > 0 else profit_down_color if d_val < 0 else text_color
+            
             format_str = ",.0f" if info["src"] == "naver_stock" else ",.1f" if "비트코인" in name else ",.2f"
             html_cards += f'<div style="flex: 1 1 calc(25% - 8px); min-width: 105px; background-color: {df_bg}; border: 1px solid {border_color}; border-radius: 8px; padding: 10px 5px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">'
             html_cards += f'<div style="font-size: 11px; color: gray; margin-bottom: 4px;">{name}</div>'
