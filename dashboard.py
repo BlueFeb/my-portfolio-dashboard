@@ -17,15 +17,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
-is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=True)
-auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=False)
-st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
-
-# 🚀 사이드바 설정 영구 저장 로직
+# 🚀 [업데이트] 사이드바 설정 영구 저장 로직 (상단 토글까지 확장)
 SIDEBAR_SETTINGS_FILE = "sidebar_settings.json"
 
 def load_sidebar_settings():
-    defaults = {"stock": 50, "crypto": 10, "commodity": 10, "bond": 20, "show_drawdown": False}
+    defaults = {
+        "dark_mode": True, 
+        "auto_refresh": False,
+        "stock": 50, 
+        "crypto": 10, 
+        "commodity": 10, 
+        "bond": 20, 
+        "show_drawdown": False
+    }
     try:
         if os.path.exists(SIDEBAR_SETTINGS_FILE):
             with open(SIDEBAR_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -38,6 +42,8 @@ def save_sidebar_settings():
     try:
         with open(SIDEBAR_SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump({
+                "dark_mode": st.session_state.dark_mode,
+                "auto_refresh": st.session_state.auto_refresh,
                 "stock": st.session_state.target_stock,
                 "crypto": st.session_state.target_crypto,
                 "commodity": st.session_state.target_commodity,
@@ -47,6 +53,10 @@ def save_sidebar_settings():
     except: pass
 
 ss = load_sidebar_settings()
+
+is_dark_mode = st.sidebar.toggle("🌙 다크 모드 켜기", value=ss["dark_mode"], key="dark_mode", on_change=save_sidebar_settings)
+auto_refresh = st.sidebar.toggle("🔄 실시간 자동 새로고침 (30초)", value=ss["auto_refresh"], key="auto_refresh", on_change=save_sidebar_settings)
+st.sidebar.caption("자동 새로고침을 켜면 30초마다 시세를, 60초마다 총자산을 업데이트합니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("⚖️ **목표 자산 비중 설정 (%)**")
@@ -76,6 +86,7 @@ if is_dark_mode:
     line_color = '#FF99CC'
     profit_up_color, profit_down_color = '#FF9999', '#99CCFF' 
     p_up_bg, p_dn_bg = "rgba(255, 153, 153, 0.12)", "rgba(153, 204, 255, 0.12)"
+    gold_highlight = '#FFD700' 
 else:
     bg_color, text_color = "#F8F9FA", "#212529"
     df_bg, df_text = "#FFFFFF", "#212529"
@@ -85,6 +96,7 @@ else:
     line_color = '#FF6699'
     profit_up_color, profit_down_color = '#E63946', '#457B9D'
     p_up_bg, p_dn_bg = "rgba(230, 57, 70, 0.08)", "rgba(69, 123, 157, 0.08)"
+    gold_highlight = '#B8860B'
 
 st.markdown(f"""
     <style>
@@ -102,7 +114,6 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
-# 🚀 역방향(Inverse) 로직 삭제: 색상 렌더링 시 부호에 맞춰 통일되도록 설정
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": ""},
     "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": ""},
@@ -145,18 +156,9 @@ def save_macro_settings(selected):
 
 def fetch_single_macro(name, info):
     try:
-        if info["src"] == "naver_index":
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/index/{info['ticker']}", timeout=3)
-            data = res.json()['datas'][0]
-            curr = float(data['closePrice'].replace(',', ''))
-            change_pct = float(data['fluctuationsRatio'])
-            raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
-            change_val = abs(float(raw_change_val))
-            if change_pct < 0: change_val = -change_val
-            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-            
-        elif info["src"] == "naver_stock":
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{info['ticker']}", timeout=3)
+        if info["src"] in ["naver_index", "naver_stock"]:
+            api_type = "index" if info["src"] == "naver_index" else "stock"
+            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/{api_type}/{info['ticker']}", timeout=3)
             data = res.json()['datas'][0]
             curr = float(data['closePrice'].replace(',', ''))
             change_pct = float(data['fluctuationsRatio'])
@@ -180,7 +182,7 @@ def fetch_single_macro(name, info):
             
         elif info["src"] == "yahoo":
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            headers = {'User-Agent': 'Mozilla/5.0'}
             res = requests.get(url, headers=headers, timeout=5)
             meta = res.json()['chart']['result'][0]['meta']
             curr = float(meta['regularMarketPrice'])
@@ -260,7 +262,6 @@ def fetch_single_dividend(ticker):
             return ticker, pd.Series(dtype=float), None, None
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
-        
         ex_date = None
         try: 
             info = stock.info
@@ -488,8 +489,6 @@ else:
         
         if data is not None:
             curr, d_val, d_pct = data["current"], data["change_val"], data["change_pct"]
-            
-            # 🚀 [업데이트] 무조건 플러스(+)는 빨간색, 마이너스(-)는 파란색으로 통일!
             color = profit_up_color if d_val > 0 else profit_down_color if d_val < 0 else text_color
             
             format_str = ",.0f" if info["src"] == "naver_stock" else ",.1f" if "비트코인" in name else ",.2f"
