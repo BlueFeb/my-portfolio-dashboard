@@ -502,19 +502,27 @@ else:
     st.markdown(html_cards, unsafe_allow_html=True)
 st.markdown("---")
 
+# 🚀 [버그 수정 완료] 그룹화 전 데이터 전처리 추가로 중복 쪼개짐 완벽 방지
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
 else:
     for col in ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']:
         if col not in df.columns: df[col] = 0 if col in ['수량', '거래단가'] else ""
+        
+    # [수정] 구글 시트 데이터의 띄어쓰기/공백, 빈칸 차이로 인해 2개로 나뉘는 현상 방지
+    df['자산군'] = df['자산군'].astype(str).str.strip().replace('', '주식').fillna('주식')
+    df['종목명'] = df['종목명'].astype(str).str.strip().replace('', '알수없음').fillna('알수없음')
+    df['티커'] = df['티커'].astype(str).str.strip()
+    df['통화'] = df['통화'].astype(str).str.strip().str.upper()
+    df['거래종류'] = df['거래종류'].astype(str).str.strip()
+
     df['수량'] = pd.to_numeric(df['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df['거래단가'] = pd.to_numeric(df['거래단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    df['계산용수량'] = df.apply(lambda x: x['수량'] if str(x['거래종류']).strip() == '매수' else -x['수량'], axis=1)
+    df['계산용수량'] = df.apply(lambda x: x['수량'] if x['거래종류'] == '매수' else -x['수량'], axis=1)
     
+    # 완벽하게 전처리된 데이터로 안심하고 그룹화
     holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
     holdings = holdings[holdings['계산용수량'] > 0].copy()
-    holdings['자산군'] = holdings['자산군'].replace('', '주식').fillna('주식') 
-    holdings['종목명'] = holdings['종목명'].replace('', '알수없음').fillna('알수없음')
 
     buy_df = df[df['거래종류'] == '매수'].copy()
     buy_df['결제금액'] = buy_df['수량'] * buy_df['거래단가']
