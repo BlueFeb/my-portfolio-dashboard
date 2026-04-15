@@ -120,8 +120,8 @@ st.markdown(f"""
 # 🔧 requests.Session으로 커넥션 재사용 (TCP handshake 절감)
 _naver_session = requests.Session()
 _naver_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-    'Referer': 'https://finance.naver.com/',
+    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+    'Referer': 'https://m.stock.naver.com/',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
 })
@@ -171,6 +171,15 @@ YAHOO_FALLBACK_MAP = {
     "005930": "005930.KS",
     "000660": "000660.KS",
 }
+
+def _get_yahoo_ticker_for_kr(code):
+    """한국 종목 코드 → Yahoo 티커 변환 (동적)"""
+    if code in YAHOO_FALLBACK_MAP:
+        return YAHOO_FALLBACK_MAP[code]
+    # 6자리 종목코드 → .KS (코스피 기본, 코스닥은 .KQ이지만 .KS로도 대부분 작동)
+    if code.isdigit() and len(code) == 6:
+        return f"{code}.KS"
+    return None
 
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": ""},
@@ -324,9 +333,10 @@ def _fetch_kr_adaptive(code, is_index=False):
         except Exception:
             _src["naver_legacy_ok"] = False
 
-    # Yahoo Finance 폴백
-    yahoo_ticker = YAHOO_FALLBACK_MAP.get(code)
+    # Yahoo Finance 폴백 (v8 API → yfinance 순서)
+    yahoo_ticker = _get_yahoo_ticker_for_kr(code)
     if yahoo_ticker:
+        # 1차: v8 chart API
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?range=2d&interval=1d"
             res = _yahoo_session.get(url, timeout=3)
@@ -334,6 +344,16 @@ def _fetch_kr_adaptive(code, is_index=False):
             meta = res.json()['chart']['result'][0]['meta']
             curr = float(meta['regularMarketPrice'])
             prev = float(meta['chartPreviousClose'])
+            cval = curr - prev
+            cpct = (cval / prev * 100) if prev else 0
+            return curr, cpct, cval
+        except Exception:
+            pass
+        # 2차: yfinance 라이브러리 (최종 폴백)
+        try:
+            fi = yf.Ticker(yahoo_ticker).fast_info
+            curr = float(fi['lastPrice'])
+            prev = float(fi['previousClose'])
             cval = curr - prev
             cpct = (cval / prev * 100) if prev else 0
             return curr, cpct, cval
@@ -355,8 +375,14 @@ def fetch_single_macro(name, info):
 
         elif info["src"] == "naver_vkospi":
             try:
-                res = _naver_session.get(
-                    "https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", timeout=2)
+                # VKOSPI는 데스크톱 HTML 파싱이므로 데스크톱 UA 사용
+                _desktop_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                    'Referer': 'https://finance.naver.com/',
+                }
+                res = requests.get(
+                    "https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI",
+                    headers=_desktop_headers, timeout=2)
                 m = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
                 if m:
                     curr = float(m.group(1))
@@ -474,9 +500,16 @@ def fetch_single_price(ticker):
         if ticker.endswith('.KS') or ticker.endswith('.KQ'):
             code = ticker.split('.')[0]
             curr, cpct, _ = _fetch_kr_adaptive(code, is_index=False)
-            if curr is not None:
+            if curr is not None and curr > 0:
                 return ticker, curr, cpct
-            return ticker, 0.0, 0.0
+            # _fetch_kr_adaptive에 YAHOO_FALLBACK_MAP에 없는 종목이면 직접 yfinance
+            try:
+                fi = yf.Ticker(ticker).fast_info
+                curr = float(fi['lastPrice'])
+                prev = float(fi['previousClose'])
+                return ticker, curr, ((curr - prev) / prev * 100) if prev else 0
+            except:
+                return ticker, 0.0, 0.0
         # Yahoo
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2d&interval=1d"
@@ -499,7 +532,7 @@ def fetch_single_price(ticker):
 
 @st.cache_data(ttl=30)
 def get_all_market_data(tickers_tuple):
-    """⚡ 전종목 시세 — 배치 우선, 누락분만 개별"""
+    """⚡ 전종목 시세 — Yahoo 배치(한국+해외 통합) + 네이버 병렬"""
     results = {}
     tickers = list(tickers_tuple)
 
@@ -507,31 +540,42 @@ def get_all_market_data(tickers_tuple):
     kr_tickers = [t for t in tickers if t.endswith('.KS') or t.endswith('.KQ')]
     yahoo_tickers = [t for t in tickers if t not in kr_tickers]
 
-    # 1) Yahoo 배치 (1회 HTTP)
-    if yahoo_tickers:
-        batch = _yahoo_batch_quotes(yahoo_tickers, timeout=3)
-        if not batch:
-            batch = _yahoo_batch_chart(yahoo_tickers, timeout=3)
-        for t in yahoo_tickers:
-            if t in batch:
-                curr, prev = batch[t]
-                cpct = ((curr - prev) / prev * 100) if prev else 0
-                results[t] = (curr, cpct)
-            # 누락분은 아래에서 처리
+    # 1) Yahoo 배치: 해외 + 한국 종목 한꺼번에 (1회 HTTP)
+    all_yahoo_batch_tickers = yahoo_tickers + kr_tickers
+    batch = {}
+    if all_yahoo_batch_tickers:
+        batch = _yahoo_batch_quotes(all_yahoo_batch_tickers, timeout=4)
+        missing_batch = [t for t in all_yahoo_batch_tickers if t not in batch]
+        if missing_batch:
+            batch.update(_yahoo_batch_chart(missing_batch, timeout=3))
 
-    # 2) 한국 종목 병렬 (네이버 적응형)
-    if kr_tickers:
-        with ThreadPoolExecutor(max_workers=min(len(kr_tickers), 6)) as ex:
-            futs = {ex.submit(fetch_single_price, t): t for t in kr_tickers}
+    for t in yahoo_tickers:
+        if t in batch:
+            curr, prev = batch[t]
+            cpct = ((curr - prev) / prev * 100) if prev else 0
+            results[t] = (curr, cpct)
+
+    for t in kr_tickers:
+        if t in batch:
+            curr, prev = batch[t]
+            cpct = ((curr - prev) / prev * 100) if prev else 0
+            results[t] = (curr, cpct)
+
+    # 2) 한국 종목 중 Yahoo 배치에 없는 것 → 네이버 적응형 개별
+    kr_missing = [t for t in kr_tickers if t not in results or results[t][0] <= 0]
+    if kr_missing:
+        with ThreadPoolExecutor(max_workers=min(len(kr_missing), 6)) as ex:
+            futs = {ex.submit(fetch_single_price, t): t for t in kr_missing}
             for fut in as_completed(futs):
                 t, price, change = fut.result()
-                results[t] = (price, change)
+                if price > 0:
+                    results[t] = (price, change)
 
-    # 3) 누락된 Yahoo 종목 개별 폴백
-    missing = [t for t in yahoo_tickers if t not in results]
-    if missing:
-        with ThreadPoolExecutor(max_workers=min(len(missing), 6)) as ex:
-            futs = {ex.submit(fetch_single_price, t): t for t in missing}
+    # 3) 해외 종목 누락분 개별 폴백
+    yahoo_missing = [t for t in yahoo_tickers if t not in results or results[t][0] <= 0]
+    if yahoo_missing:
+        with ThreadPoolExecutor(max_workers=min(len(yahoo_missing), 6)) as ex:
+            futs = {ex.submit(fetch_single_price, t): t for t in yahoo_missing}
             for fut in as_completed(futs):
                 t, price, change = fut.result()
                 results[t] = (price, change)
@@ -821,8 +865,15 @@ else:
     if usd_krw_price <= 0.0: usd_krw_price = 1450.0
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
+    _price_failed_tickers = []
     for index, row in holdings.iterrows():
         current_price, _ = market_data_dict.get(row['티커'], (0.0, 0.0))
+        
+        # 🔧 가격 0원 방어: 매입단가로 대체 (−100% 표시 방지)
+        if current_price <= 0 and row['평균매입단가'] > 0:
+            current_price = row['평균매입단가']
+            _price_failed_tickers.append(row['종목명'])
+        
         realtime_prices.append(current_price)
         rate = usd_krw_price if row['통화'] == "USD" else 1
         eval_krw = current_price * row['계산용수량'] * rate 
@@ -832,6 +883,9 @@ else:
         total_costs_krw.append(cost_krw)
         profit_amounts.append(eval_krw - cost_krw)
         profit_pcts.append(((current_price - row['평균매입단가']) / row['평균매입단가'] * 100) if row['평균매입단가'] > 0 else 0.0)
+
+    if _price_failed_tickers:
+        st.warning(f"⚠️ 시세 조회 실패 → 매입단가로 대체 중: {', '.join(_price_failed_tickers)} (네이버/Yahoo 모두 응답 없음)")
 
     holdings['평가액(원)'] = total_values_krw
     holdings['손익(원)'] = profit_amounts
@@ -1096,7 +1150,9 @@ else:
     with st.expander("🔧 데이터 소스 상태"):
         nv = "✅" if _src.get("naver_ok") else "❌"
         nvl = "✅" if _src.get("naver_legacy_ok") else "❌"
-        st.caption(f"네이버 신규: {nv} | 레거시: {nvl} | 5분마다 재시도 | Yahoo 배치: 항상 활성")
+        st.caption(f"네이버 신규: {nv} | 레거시: {nvl} | Yahoo 배치+yfinance 폴백: 항상 활성")
+        if not _src.get("naver_ok") and not _src.get("naver_legacy_ok"):
+            st.caption("⚠️ 네이버 API 모두 차단 상태 → Yahoo Finance(yfinance)로 한국 종목 조회 중. 5분 후 네이버 재시도.")
 
 if auto_refresh:
     time.sleep(30)
