@@ -114,6 +114,29 @@ st.markdown(f"""
     </style>
 """, unsafe_allow_html=True)
 
+# ============================================================
+# 🔧 [핵심 수정] 네이버 금융 API 헤더 + Yahoo Finance 폴백 추가
+# ============================================================
+
+NAVER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Referer': 'https://finance.naver.com/',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+}
+
+YAHOO_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+}
+
+# 🔧 [수정] 코스피/코스닥 → Yahoo Finance 티커 매핑 (네이버 실패 시 폴백)
+YAHOO_FALLBACK_MAP = {
+    "KOSPI": "^KS11",
+    "KOSDAQ": "^KQ11",
+    "005930": "005930.KS",   # 삼성전자
+    "000660": "000660.KS",   # SK하이닉스
+}
+
 INDICATORS_CONFIG = {
     "🇰🇷 코스피": {"ticker": "KOSPI", "src": "naver_index", "prefix": "", "suffix": ""},
     "🇰🇷 코스닥": {"ticker": "KOSDAQ", "src": "naver_index", "prefix": "", "suffix": ""},
@@ -154,45 +177,172 @@ def save_macro_settings(selected):
             json.dump({"indicators": selected}, f, ensure_ascii=False)
     except: pass
 
-def fetch_single_macro(name, info):
+# ============================================================
+# 🔧 [핵심 수정] Yahoo Finance API v8 차단 대응 → yfinance 라이브러리 폴백
+# ============================================================
+
+def _fetch_yahoo_api(ticker, timeout=5):
+    """Yahoo Finance v8 API로 시세 조회 (1차 시도)"""
+    url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2d&interval=1m"
+    res = requests.get(url, headers=YAHOO_HEADERS, timeout=timeout)
+    res.raise_for_status()
+    meta = res.json()['chart']['result'][0]['meta']
+    curr = float(meta['regularMarketPrice'])
+    prev = float(meta['chartPreviousClose'])
+    return curr, prev
+
+def _fetch_yahoo_yfinance(ticker):
+    """yfinance 라이브러리로 시세 조회 (2차 폴백)"""
+    t = yf.Ticker(ticker)
+    info = t.fast_info
+    curr = float(info['lastPrice'])
+    prev = float(info['previousClose'])
+    return curr, prev
+
+def fetch_yahoo_price(ticker, timeout=5):
+    """Yahoo Finance 시세 조회 - API 먼저 시도, 실패 시 yfinance 폴백"""
+    # 1차: v8 API 직접 호출
     try:
-        if info["src"] in ["naver_index", "naver_stock"]:
-            api_type = "index" if info["src"] == "naver_index" else "stock"
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/{api_type}/{info['ticker']}", timeout=3)
-            data = res.json()['datas'][0]
-            curr = float(data['closePrice'].replace(',', ''))
-            change_pct = float(data['fluctuationsRatio'])
-            raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
-            change_val = abs(float(raw_change_val))
-            if change_pct < 0: change_val = -change_val
-            return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-            
-        elif info["src"] == "naver_vkospi":
-            res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-            curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
-            if curr_match:
-                curr = float(curr_match.group(1))
-                chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
-                raw_val = float(chg_match.group(1)) if chg_match else 0.0
-                change_val = -raw_val if "nv01" in res.text else raw_val
-                prev = curr - change_val
-                change_pct = (change_val / prev) * 100 if prev > 0 else 0.0
+        return _fetch_yahoo_api(ticker, timeout)
+    except Exception:
+        pass
+    # 2차: yfinance 라이브러리
+    try:
+        return _fetch_yahoo_yfinance(ticker)
+    except Exception:
+        return None, None
+
+
+# ============================================================
+# 🔧 [핵심 수정] 네이버 금융 API 수정 - 헤더 추가 + 폴백 로직
+# ============================================================
+
+def _fetch_naver_stock(code, timeout=3):
+    """네이버 금융 개별종목 API (헤더 포함)"""
+    url = f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"
+    res = requests.get(url, headers=NAVER_HEADERS, timeout=timeout)
+    res.raise_for_status()
+    data = res.json()['datas'][0]
+    curr = float(data['closePrice'].replace(',', ''))
+    change_pct = float(data['fluctuationsRatio'])
+    raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
+    change_val = abs(float(raw_change_val))
+    if change_pct < 0: change_val = -change_val
+    return curr, change_pct, change_val
+
+def _fetch_naver_index(code, timeout=3):
+    """네이버 금융 지수 API (헤더 포함)"""
+    url = f"https://polling.finance.naver.com/api/realtime/domestic/index/{code}"
+    res = requests.get(url, headers=NAVER_HEADERS, timeout=timeout)
+    res.raise_for_status()
+    data = res.json()['datas'][0]
+    curr = float(data['closePrice'].replace(',', ''))
+    change_pct = float(data['fluctuationsRatio'])
+    raw_change_val = str(data['compareToPreviousClosePrice']).replace(',', '')
+    change_val = abs(float(raw_change_val))
+    if change_pct < 0: change_val = -change_val
+    return curr, change_pct, change_val
+
+def _fetch_naver_realtime_legacy(code, service_type="SERVICE_INDEX", timeout=3):
+    """네이버 금융 레거시 API (구형 엔드포인트 폴백)"""
+    url = f"https://polling.finance.naver.com/api/realtime?query={service_type}:{code}"
+    res = requests.get(url, headers=NAVER_HEADERS, timeout=timeout)
+    res.raise_for_status()
+    result = res.json()['result']
+    areas = result.get('areas', [])
+    if areas and areas[0].get('datas'):
+        data = areas[0]['datas'][0]
+        curr = float(str(data.get('nv', data.get('closePrice', '0'))).replace(',', ''))
+        change_val = float(str(data.get('cv', data.get('compareToPreviousClosePrice', '0'))).replace(',', ''))
+        change_pct = float(str(data.get('cr', data.get('fluctuationsRatio', '0'))).replace(',', ''))
+        return curr, change_pct, change_val
+    raise ValueError("No data in legacy API response")
+
+def _fetch_korea_via_yahoo(naver_code):
+    """네이버 API 실패 시 Yahoo Finance로 한국 종목/지수 조회"""
+    yahoo_ticker = YAHOO_FALLBACK_MAP.get(naver_code)
+    if not yahoo_ticker:
+        return None
+    curr, prev = fetch_yahoo_price(yahoo_ticker, timeout=5)
+    if curr is None or prev is None or prev == 0:
+        return None
+    change_val = curr - prev
+    change_pct = (change_val / prev) * 100
+    return curr, change_pct, change_val
+
+
+def fetch_single_macro(name, info):
+    """매크로 지표 단일 조회 - 다중 폴백 지원"""
+    try:
+        if info["src"] == "naver_index":
+            # 1차: 새 API + 헤더
+            try:
+                curr, change_pct, change_val = _fetch_naver_index(info['ticker'])
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            except Exception:
+                pass
+            # 2차: 레거시 API
+            try:
+                curr, change_pct, change_val = _fetch_naver_realtime_legacy(info['ticker'], "SERVICE_INDEX")
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            except Exception:
+                pass
+            # 3차: Yahoo Finance 폴백
+            result = _fetch_korea_via_yahoo(info['ticker'])
+            if result:
+                curr, change_pct, change_val = result
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            return name, None
+
+        elif info["src"] == "naver_stock":
+            # 1차: 새 API + 헤더
+            try:
+                curr, change_pct, change_val = _fetch_naver_stock(info['ticker'])
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            except Exception:
+                pass
+            # 2차: 레거시 API
+            try:
+                curr, change_pct, change_val = _fetch_naver_realtime_legacy(info['ticker'], "SERVICE_ITEM")
+                return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            except Exception:
+                pass
+            # 3차: Yahoo Finance 폴백
+            result = _fetch_korea_via_yahoo(info['ticker'])
+            if result:
+                curr, change_pct, change_val = result
                 return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
             return name, None
             
+        elif info["src"] == "naver_vkospi":
+            # 1차: 네이버 웹페이지 스크래핑
+            try:
+                res = requests.get("https://finance.naver.com/sise/sise_index.naver?code=VIXKOSPI", headers=NAVER_HEADERS, timeout=3)
+                curr_match = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
+                if curr_match:
+                    curr = float(curr_match.group(1))
+                    chg_match = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
+                    raw_val = float(chg_match.group(1)) if chg_match else 0.0
+                    change_val = -raw_val if "nv01" in res.text else raw_val
+                    prev = curr - change_val
+                    change_pct = (change_val / prev) * 100 if prev > 0 else 0.0
+                    return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
+            except Exception:
+                pass
+            # 2차: Yahoo Finance (^VKOSPI는 Yahoo에 없을 수 있으므로 None 반환)
+            return name, None
+            
         elif info["src"] == "yahoo":
-            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{info['ticker']}?range=2d&interval=1m"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(url, headers=headers, timeout=5)
-            meta = res.json()['chart']['result'][0]['meta']
-            curr = float(meta['regularMarketPrice'])
-            prev = float(meta['chartPreviousClose'])
+            curr, prev = fetch_yahoo_price(info['ticker'])
+            if curr is None or prev is None:
+                return name, None
             if info["ticker"] == "JPYKRW=X": 
                 curr *= 100; prev *= 100
             change_val = curr - prev
             change_pct = (change_val / prev) * 100 if prev != 0 else 0.0
             return name, {"current": curr, "change_pct": change_pct, "change_val": change_val}
-    except: return name, None
+    except Exception:
+        return name, None
 
 @st.cache_data(ttl=30) 
 def get_macro_indicators(selected_names_tuple):
@@ -227,24 +377,47 @@ df = df_raw.copy()
 df_history = df_history_raw.copy()
 df_pnl = df_pnl_raw.copy()
 
+# ============================================================
+# 🔧 [핵심 수정] 개별 종목 시세 조회도 동일하게 다중 폴백 적용
+# ============================================================
+
 def fetch_single_price(ticker):
     try:
         if not ticker or not isinstance(ticker, str): return ticker, 0.0, 0.0
+        
+        # 한국 종목 (.KS, .KQ)
         if ticker.endswith('.KS') or ticker.endswith('.KQ'):
             code = ticker.split('.')[0]
-            res = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}", timeout=3)
-            data = res.json()['datas'][0]
-            return ticker, float(data['closePrice'].replace(',', '')), float(data['fluctuationsRatio'])
+            # 1차: 네이버 API (헤더 포함)
+            try:
+                curr, change_pct, _ = _fetch_naver_stock(code)
+                return ticker, curr, change_pct
+            except Exception:
+                pass
+            # 2차: 네이버 레거시 API
+            try:
+                curr, change_pct, _ = _fetch_naver_realtime_legacy(code, "SERVICE_ITEM")
+                return ticker, curr, change_pct
+            except Exception:
+                pass
+            # 3차: Yahoo Finance 폴백
+            try:
+                curr, prev = fetch_yahoo_price(ticker)
+                if curr and prev and prev > 0:
+                    change_pct = ((curr - prev) / prev) * 100
+                    return ticker, curr, change_pct
+            except Exception:
+                pass
+            return ticker, 0.0, 0.0
         
-        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}?range=2d&interval=1m"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=5)
-        meta = res.json()['chart']['result'][0]['meta']
-        curr = float(meta['regularMarketPrice'])
-        prev = float(meta['chartPreviousClose'])
-        change_pct = ((curr - prev) / prev) * 100 if prev > 0 else 0.0
-        return ticker, curr, change_pct
-    except: return ticker, 0.0, 0.0
+        # 해외 종목
+        curr, prev = fetch_yahoo_price(ticker)
+        if curr is not None and prev is not None and prev > 0:
+            change_pct = ((curr - prev) / prev) * 100
+            return ticker, curr, change_pct
+        return ticker, 0.0, 0.0
+    except: 
+        return ticker, 0.0, 0.0
 
 @st.cache_data(ttl=30)
 def get_all_market_data(tickers_tuple):
@@ -433,7 +606,7 @@ def style_drawdown_table(df):
         styles_df = pd.DataFrame('', index=display_df.index, columns=display_df.columns)
         levels = [-5, -10, -15, -20, -25, -30, -35, -40]
         
-        for i in range(len(data)):
+        for i in data.index:
             curr = data.loc[i, '_curr_raw']
             high = data.loc[i, '_high_raw']
             
@@ -458,6 +631,34 @@ def style_drawdown_table(df):
         return styles_df
         
     return display_df.style.apply(lambda x: get_styles(df), axis=None).set_properties(**{'text-align': 'center'})
+
+# ============================================================
+# 🆕 [신규] 데이터 소스 상태 표시 (디버깅 도움)
+# ============================================================
+
+def get_data_source_status():
+    """현재 데이터 소스 상태를 체크"""
+    status = {}
+    # 네이버 API 체크
+    try:
+        _fetch_naver_index("KOSPI")
+        status["naver_new"] = "✅"
+    except:
+        status["naver_new"] = "❌"
+    # 네이버 레거시 API 체크
+    try:
+        _fetch_naver_realtime_legacy("KOSPI", "SERVICE_INDEX")
+        status["naver_legacy"] = "✅"
+    except:
+        status["naver_legacy"] = "❌"
+    # Yahoo Finance 체크
+    try:
+        curr, prev = fetch_yahoo_price("^KS11")
+        status["yahoo_kr"] = "✅" if curr else "❌"
+    except:
+        status["yahoo_kr"] = "❌"
+    return status
+
 
 # -------------------------- UI 렌더링 --------------------------
 
@@ -555,7 +756,7 @@ else:
     holdings['평가액(원)'] = total_values_krw
     holdings['손익(원)'] = profit_amounts
     holdings['수익률(%)'] = profit_pcts
-    holdings['평가액(만원)'] = (pd.Series(total_values_krw) / 10000).fillna(0).astype(int)
+    holdings['평가액(만원)'] = (pd.Series(total_values_krw, index=holdings.index) / 10000).fillna(0).astype(int)
 
     total_asset = sum(total_values_krw)
     total_cost = sum(total_costs_krw)
@@ -659,8 +860,23 @@ else:
     tab_data1, tab_data3, tab_data4, tab_rebal = st.tabs(["📊 자산 상세", "🔮 이벤트 캘린더", "📅 글로벌 경제 지표", "⚖️ 리밸런싱 계산기"])
 
     with tab_data1:
+        # 🆕 [개선] 자산 상세 테이블에 현재가, 전일비(%), 평균매입단가 열 추가
         display_df = holdings[['종목명', '계산용수량', '수익률(%)', '평가액(원)', '손익(원)']].copy()
         display_df.rename(columns={'계산용수량': '수량', '수익률(%)': '수익률', '평가액(원)': '평가액', '손익(원)': '손익'}, inplace=True)
+        
+        # 전일비(%) 추가
+        day_changes = []
+        for _, row in holdings.iterrows():
+            _, change_pct = market_data_dict.get(row['티커'], (0.0, 0.0))
+            day_changes.append(change_pct)
+        display_df['전일비(%)'] = day_changes
+        
+        # 비중(%) 추가
+        display_df['비중(%)'] = (holdings['평가액(원)'].values / total_asset * 100) if total_asset > 0 else 0.0
+        
+        # 열 순서 재배치
+        display_df = display_df[['종목명', '수량', '비중(%)', '전일비(%)', '수익률', '평가액', '손익']]
+        
         def style_table(val):
             if isinstance(val, (int, float)):
                 color = profit_up_color if val > 0 else profit_down_color if val < 0 else text_color
@@ -669,8 +885,8 @@ else:
         st.dataframe(
             display_df.style
             .set_properties(**{'background-color': df_bg, 'color': df_text, 'font-size': '14px'})
-            .format({'수량': '{:,.1f}', '수익률': '{:,.2f}%', '평가액': '{:,.0f}', '손익': '{:,.0f}'})
-            .map(style_table, subset=['수익률', '손익']),
+            .format({'수량': '{:,.1f}', '비중(%)': '{:,.1f}%', '전일비(%)': '{:+,.2f}%', '수익률': '{:,.2f}%', '평가액': '{:,.0f}', '손익': '{:,.0f}'})
+            .map(style_table, subset=['수익률', '손익', '전일비(%)']),
             use_container_width=True, hide_index=True
         )
             
@@ -801,6 +1017,21 @@ else:
             )
         else:
             st.caption("좌측 ⚙️ 사이드바를 열어 목표 자산 비중 수치를 올바르게 입력해 주세요.")
+
+    # 🆕 [신규] 페이지 하단에 데이터 소스 상태 표시
+    with st.expander("🔧 데이터 소스 상태 확인"):
+        st.caption("한국장 데이터가 안 나올 때 여기서 어떤 API가 살아있는지 확인하세요.")
+        if st.button("상태 체크", key="status_check"):
+            with st.spinner("API 상태 확인 중..."):
+                status = get_data_source_status()
+            st.markdown(f"""
+            | 소스 | 상태 | 설명 |
+            |------|------|------|
+            | 네이버 신규 API | {status.get('naver_new', '?')} | `polling.finance.naver.com/api/realtime/domestic/...` |
+            | 네이버 레거시 API | {status.get('naver_legacy', '?')} | `polling.finance.naver.com/api/realtime?query=...` |
+            | Yahoo Finance (KR) | {status.get('yahoo_kr', '?')} | `^KS11` (코스피 Yahoo 티커) |
+            """)
+            st.caption("❌가 뜨더라도 Yahoo Finance 폴백이 작동하면 데이터가 정상 표시됩니다.")
 
 if auto_refresh:
     time.sleep(30)
