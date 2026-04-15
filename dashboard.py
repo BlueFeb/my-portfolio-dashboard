@@ -206,6 +206,8 @@ MACRO_SETTINGS_FILE = "macro_settings.json"
 
 def load_macro_settings():
     default_inds = ["🇰🇷 삼성전자", "🇰🇷 SK하이닉스", "🇰🇷 코스피", "🇺🇸 US Tech 100 선물", "💱 원/달러", "💎 비트코인"]
+    
+    # 1순위: 파일 (가장 최신)
     try:
         if os.path.exists(MACRO_SETTINGS_FILE):
             with open(MACRO_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -214,12 +216,27 @@ def load_macro_settings():
                 valid_saved = [x for x in saved if x in INDICATORS_CONFIG]
                 if valid_saved: return valid_saved
     except: pass
+    
+    # 2순위: URL query_params (앱 재부팅/ephemeral filesystem 대응)
+    try:
+        qp = st.query_params
+        if "indicators" in qp:
+            decoded = json.loads(qp["indicators"])
+            valid = [x for x in decoded if x in INDICATORS_CONFIG]
+            if valid: return valid
+    except: pass
+    
     return default_inds
 
 def save_macro_settings(selected):
+    # 파일 저장
     try:
         with open(MACRO_SETTINGS_FILE, "w", encoding="utf-8") as f: 
             json.dump({"indicators": selected}, f, ensure_ascii=False)
+    except: pass
+    # URL query_params 백업 (앱 재부팅 시에도 유지)
+    try:
+        st.query_params["indicators"] = json.dumps(selected, ensure_ascii=False)
     except: pass
 
 
@@ -848,7 +865,19 @@ def style_drawdown_table(df):
 st.markdown('<div class="row-widget-hook"></div>', unsafe_allow_html=True)
 col_title, col_setting = st.columns([7, 3])
 
-if "macro_selector" not in st.session_state: st.session_state.macro_selector = load_macro_settings()
+# 🔧 전광판 종목/순서 초기화 방지
+# Streamlit은 절전/reconnect 시 session_state를 초기화함
+# → 파일을 source of truth로 두고, session_state가 비면 파일에서 복원
+# → key="macro_selector"를 쓰면 Streamlit이 위젯 값을 session_state에 자동 반영
+# → 위젯 렌더링 전에 session_state에 값을 넣어두면 그것이 위젯 초기값이 됨
+if "macro_selector" not in st.session_state:
+    st.session_state.macro_selector = load_macro_settings()
+elif not st.session_state.macro_selector:
+    # 빈 리스트로 초기화된 경우 (절전 복귀 등) → 파일에서 복원
+    _file_saved = load_macro_settings()
+    if _file_saved:
+        st.session_state.macro_selector = _file_saved
+
 def on_macro_change(): save_macro_settings(st.session_state.macro_selector)
 
 with col_title:
@@ -857,10 +886,24 @@ with col_title:
 with col_setting:
     try:
         with st.popover("⚙️ 설정", use_container_width=True):
-            st.multiselect("최대 9개 선택", options=list(INDICATORS_CONFIG.keys()), key="macro_selector", max_selections=9, on_change=on_macro_change, label_visibility="collapsed")
+            st.multiselect(
+                "최대 9개 선택",
+                options=list(INDICATORS_CONFIG.keys()),
+                key="macro_selector",
+                max_selections=9,
+                on_change=on_macro_change,
+                label_visibility="collapsed"
+            )
     except AttributeError:
         with st.expander("⚙️ 설정"):
-            st.multiselect("최대 9개 선택", options=list(INDICATORS_CONFIG.keys()), key="macro_selector", max_selections=9, on_change=on_macro_change, label_visibility="collapsed")
+            st.multiselect(
+                "최대 9개 선택",
+                options=list(INDICATORS_CONFIG.keys()),
+                key="macro_selector",
+                max_selections=9,
+                on_change=on_macro_change,
+                label_visibility="collapsed"
+            )
 
 if not st.session_state.macro_selector: st.caption("선택된 지표가 없습니다. 위의 설정 창을 열어 지표를 추가해 주세요.")
 else:
@@ -892,11 +935,20 @@ else:
     for col in ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']:
         if col not in df.columns: df[col] = 0 if col in ['수량', '거래단가'] else ""
         
-    df['자산군'] = df['자산군'].astype(str).str.strip().replace('', '주식').fillna('주식')
-    df['종목명'] = df['종목명'].astype(str).str.strip().replace('', '알수없음').fillna('알수없음')
-    df['티커'] = df['티커'].astype(str).str.strip()
-    df['통화'] = df['통화'].astype(str).str.strip().str.upper()
-    df['거래종류'] = df['거래종류'].astype(str).str.strip()
+    import unicodedata
+    
+    def _normalize_str_col(series):
+        """유니코드 정규화 + 모든 종류의 공백 통일 + strip"""
+        return (series.astype(str)
+                .apply(lambda s: unicodedata.normalize('NFC', s))  # 유니코드 정규화
+                .str.replace(r'\s+', ' ', regex=True)  # 연속/특수 공백 → 일반 공백 1개
+                .str.strip())
+
+    df['자산군'] = _normalize_str_col(df['자산군']).replace('', '주식')
+    df['종목명'] = _normalize_str_col(df['종목명']).replace('', '알수없음')
+    df['티커'] = _normalize_str_col(df['티커'])
+    df['통화'] = _normalize_str_col(df['통화']).str.upper()
+    df['거래종류'] = _normalize_str_col(df['거래종류'])
 
     df['수량'] = pd.to_numeric(df['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df['거래단가'] = pd.to_numeric(df['거래단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
