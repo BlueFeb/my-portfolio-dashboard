@@ -10,8 +10,14 @@ import json
 import datetime
 import pytz
 import requests
+from requests.adapters import HTTPAdapter
+try:
+    from urllib3.util.retry import Retry
+except ImportError:
+    from requests.packages.urllib3.util.retry import Retry
 import re
 import os
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -19,6 +25,31 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
 SIDEBAR_SETTINGS_FILE = "sidebar_settings.json"
+
+# 🔧 파일 쓰기 원자화: 쓰는 중 rerun이 겹쳐도 파일이 깨지지 않도록 tempfile + os.replace
+def _atomic_write_json(path, data):
+    """임시 파일에 쓰고 os.replace로 원자적 교체 (POSIX 보장)"""
+    try:
+        dir_name = os.path.dirname(os.path.abspath(path)) or "."
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=os.path.basename(path) + ".",
+            suffix=".tmp",
+            dir=dir_name,
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp_path, path)
+        except Exception:
+            # 실패 시 임시 파일 정리
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            raise
+    except Exception:
+        pass
 
 def load_sidebar_settings():
     defaults = {
@@ -35,22 +66,20 @@ def load_sidebar_settings():
             with open(SIDEBAR_SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 defaults.update(data)
-    except: pass
+    except Exception:
+        pass
     return defaults
 
 def save_sidebar_settings():
-    try:
-        with open(SIDEBAR_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "dark_mode": st.session_state.dark_mode,
-                "auto_refresh": st.session_state.auto_refresh,
-                "stock": st.session_state.target_stock,
-                "crypto": st.session_state.target_crypto,
-                "commodity": st.session_state.target_commodity,
-                "bond": st.session_state.target_bond,
-                "show_drawdown": st.session_state.show_drawdown
-            }, f, ensure_ascii=False)
-    except: pass
+    _atomic_write_json(SIDEBAR_SETTINGS_FILE, {
+        "dark_mode": st.session_state.dark_mode,
+        "auto_refresh": st.session_state.auto_refresh,
+        "stock": st.session_state.target_stock,
+        "crypto": st.session_state.target_crypto,
+        "commodity": st.session_state.target_commodity,
+        "bond": st.session_state.target_bond,
+        "show_drawdown": st.session_state.show_drawdown
+    })
 
 ss = load_sidebar_settings()
 
@@ -119,7 +148,19 @@ st.markdown(f"""
 # ============================================================
 
 # 🔧 requests.Session으로 커넥션 재사용 (TCP handshake 절감)
+# Retry 어댑터: 일시적 5xx/커넥션 에러 자동 재시도 (백오프 0.3s)
+_retry_strategy = Retry(
+    total=2,
+    backoff_factor=0.3,
+    status_forcelist=(500, 502, 503, 504),
+    allowed_methods=frozenset(["GET", "HEAD"]),
+    raise_on_status=False,
+)
+_retry_adapter = HTTPAdapter(max_retries=_retry_strategy, pool_connections=10, pool_maxsize=20)
+
 _naver_session = requests.Session()
+_naver_session.mount("https://", _retry_adapter)
+_naver_session.mount("http://", _retry_adapter)
 _naver_session.headers.update({
     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
     'Referer': 'https://m.stock.naver.com/',
@@ -128,6 +169,8 @@ _naver_session.headers.update({
 })
 
 _yahoo_session = requests.Session()
+_yahoo_session.mount("https://", _retry_adapter)
+_yahoo_session.mount("http://", _retry_adapter)
 _yahoo_session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
 })
@@ -143,15 +186,13 @@ def _load_source_status():
             with open(SOURCE_STATUS_FILE, "r") as f:
                 data = json.load(f)
                 defaults.update(data)
-    except: pass
+    except Exception:
+        pass
     return defaults
 
 def _save_source_status(status):
-    try:
-        status["last_check"] = time.time()
-        with open(SOURCE_STATUS_FILE, "w") as f:
-            json.dump(status, f)
-    except: pass
+    status["last_check"] = time.time()
+    _atomic_write_json(SOURCE_STATUS_FILE, status)
 
 # 세션 레벨 캐시 (st.session_state)
 if "_src_status" not in st.session_state:
@@ -160,10 +201,12 @@ if "_src_status" not in st.session_state:
 _src = st.session_state._src_status
 
 # 5분마다 죽은 소스 재시도
+# 🔧 버그 수정: 리셋 후 last_check를 갱신하고 파일에도 저장해야 다음 rerun에서 다시 리셋되지 않음
 if time.time() - _src.get("last_check", 0) > 300:
     _src["naver_ok"] = True
     _src["naver_legacy_ok"] = True
     _src["yahoo_v8_ok"] = True
+    _save_source_status(_src)  # last_check 갱신 + 파일 반영
 
 
 YAHOO_FALLBACK_MAP = {
@@ -215,7 +258,8 @@ def load_macro_settings():
                 saved = data.get("indicators", [])
                 valid_saved = [x for x in saved if x in INDICATORS_CONFIG]
                 if valid_saved: return valid_saved
-    except: pass
+    except Exception:
+        pass
     
     # 2순위: URL query_params (앱 재부팅/ephemeral filesystem 대응)
     try:
@@ -224,20 +268,19 @@ def load_macro_settings():
             decoded = json.loads(qp["indicators"])
             valid = [x for x in decoded if x in INDICATORS_CONFIG]
             if valid: return valid
-    except: pass
+    except Exception:
+        pass
     
     return default_inds
 
 def save_macro_settings(selected):
-    # 파일 저장
-    try:
-        with open(MACRO_SETTINGS_FILE, "w", encoding="utf-8") as f: 
-            json.dump({"indicators": selected}, f, ensure_ascii=False)
-    except: pass
+    # 파일 저장 (원자적)
+    _atomic_write_json(MACRO_SETTINGS_FILE, {"indicators": selected})
     # URL query_params 백업 (앱 재부팅 시에도 유지)
     try:
         st.query_params["indicators"] = json.dumps(selected, ensure_ascii=False)
-    except: pass
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -276,9 +319,11 @@ def _yahoo_batch_chart(tickers, timeout=4):
             curr = float(meta['regularMarketPrice'])
             prev = float(meta['chartPreviousClose'])
             return t, (curr, prev)
-        except:
+        except Exception:
             return t, None
 
+    if not tickers:
+        return results
     with ThreadPoolExecutor(max_workers=min(len(tickers), 10)) as ex:
         futs = {ex.submit(_fetch_one, t): t for t in tickers}
         for fut in as_completed(futs):
@@ -300,8 +345,14 @@ def _naver_stock_fast(code):
     d = res.json()['datas'][0]
     curr = float(d['closePrice'].replace(',', ''))
     cpct = float(d['fluctuationsRatio'])
-    cval = abs(float(str(d['compareToPreviousClosePrice']).replace(',', '')))
-    if cpct < 0: cval = -cval
+    # 🔧 compareToPreviousClosePrice는 응답에 따라 부호 포함/미포함이 섞일 수 있음
+    # → 절대값 취한 뒤 cpct의 부호로 결정 (cpct=0이면 0 유지)
+    raw_cval = float(str(d['compareToPreviousClosePrice']).replace(',', ''))
+    cval = abs(raw_cval)
+    if cpct < 0:
+        cval = -cval
+    elif cpct == 0:
+        cval = 0.0
     return curr, cpct, cval
 
 def _naver_index_fast(code):
@@ -312,8 +363,12 @@ def _naver_index_fast(code):
     d = res.json()['datas'][0]
     curr = float(d['closePrice'].replace(',', ''))
     cpct = float(d['fluctuationsRatio'])
-    cval = abs(float(str(d['compareToPreviousClosePrice']).replace(',', '')))
-    if cpct < 0: cval = -cval
+    raw_cval = float(str(d['compareToPreviousClosePrice']).replace(',', ''))
+    cval = abs(raw_cval)
+    if cpct < 0:
+        cval = -cval
+    elif cpct == 0:
+        cval = 0.0
     return curr, cpct, cval
 
 def _naver_legacy_fast(code, svc="SERVICE_INDEX"):
@@ -406,13 +461,21 @@ def fetch_single_macro(name, info):
                 m = re.search(r'<em id="now_value">([0-9.]+)</em>', res.text)
                 if m:
                     curr = float(m.group(1))
-                    cm = re.search(r'<span id="change_value_and_rate">[^\d]*([0-9.]+)[^\d]*<span', res.text)
+                    # 🔧 nv01 검색 범위를 change_value_and_rate 섹션 내부로 제한
+                    # (페이지 다른 위치의 nv01로 인한 부호 오판 방지)
+                    change_section = re.search(
+                        r'<span id="change_value_and_rate">(.*?)</span>\s*</span>',
+                        res.text, flags=re.DOTALL
+                    )
+                    section_text = change_section.group(1) if change_section else ""
+                    cm = re.search(r'([0-9.]+)', section_text)
                     rv = float(cm.group(1)) if cm else 0.0
-                    cval = -rv if "nv01" in res.text else rv
+                    cval = -rv if "nv01" in section_text else rv
                     prev = curr - cval
                     cpct = (cval / prev * 100) if prev > 0 else 0
                     return name, {"current": curr, "change_pct": cpct, "change_val": cval}
-            except: pass
+            except Exception:
+                pass
             return name, None
 
         elif info["src"] == "yahoo":
@@ -424,12 +487,12 @@ def fetch_single_macro(name, info):
                 meta = res.json()['chart']['result'][0]['meta']
                 curr = float(meta['regularMarketPrice'])
                 prev = float(meta['chartPreviousClose'])
-            except:
+            except Exception:
                 try:
                     t = yf.Ticker(info['ticker'])
                     fi = t.fast_info
                     curr, prev = float(fi['lastPrice']), float(fi['previousClose'])
-                except:
+                except Exception:
                     return name, None
 
             if info["ticker"] == "JPYKRW=X":
@@ -437,7 +500,7 @@ def fetch_single_macro(name, info):
             cval = curr - prev
             cpct = (cval / prev * 100) if prev else 0
             return name, {"current": curr, "change_pct": cpct, "change_val": cval}
-    except:
+    except Exception:
         return name, None
 
 
@@ -490,6 +553,12 @@ def get_macro_indicators(selected_names_tuple):
 def load_data():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     try:
+        # 🔧 st.secrets 미설정 방어 (친절한 에러)
+        if "google_credentials" not in st.secrets:
+            st.error("⚠️ Streamlit secrets에 'google_credentials' 키가 설정되지 않았습니다. "
+                     "Streamlit Cloud > Settings > Secrets에서 서비스 계정 JSON을 추가해 주세요.")
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
         creds_dict = json.loads(st.secrets["google_credentials"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
@@ -527,6 +596,12 @@ def load_data():
         df_pnl = _values_to_df(value_ranges[2].get('values', [])) if len(value_ranges) > 2 else pd.DataFrame()
 
         return df_tx, df_history, df_pnl
+    except json.JSONDecodeError as e:
+        st.error(f"⚠️ 구글 서비스 계정 JSON 파싱 오류: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    except gspread.exceptions.SpreadsheetNotFound:
+        st.error("⚠️ 'MyPortfolio_DB' 시트를 찾을 수 없습니다. 시트 이름과 서비스 계정 공유 권한을 확인해 주세요.")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except Exception as e:
         st.error(f"⚠️ 구글 시트 연결 오류: {e}")
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -556,7 +631,7 @@ def fetch_single_price(ticker):
                 curr = float(fi['lastPrice'])
                 prev = float(fi['previousClose'])
                 return ticker, curr, ((curr - prev) / prev * 100) if prev else 0
-            except:
+            except Exception:
                 return ticker, 0.0, 0.0
         # Yahoo
         try:
@@ -567,14 +642,14 @@ def fetch_single_price(ticker):
             curr = float(meta['regularMarketPrice'])
             prev = float(meta['chartPreviousClose'])
             return ticker, curr, ((curr - prev) / prev * 100) if prev else 0
-        except:
+        except Exception:
             try:
                 fi = yf.Ticker(ticker).fast_info
                 curr, prev = float(fi['lastPrice']), float(fi['previousClose'])
                 return ticker, curr, ((curr - prev) / prev * 100) if prev else 0
-            except:
+            except Exception:
                 return ticker, 0.0, 0.0
-    except:
+    except Exception:
         return ticker, 0.0, 0.0
 
 
@@ -590,7 +665,7 @@ def get_usd_krw_rate():
         prev = float(meta['chartPreviousClose'])
         if rate > 0:
             return rate, ((rate - prev) / prev * 100) if prev else 0
-    except:
+    except Exception:
         pass
     try:
         fi = yf.Ticker("KRW=X").fast_info
@@ -598,7 +673,7 @@ def get_usd_krw_rate():
         prev = float(fi['previousClose'])
         if rate > 0:
             return rate, ((rate - prev) / prev * 100) if prev else 0
-    except:
+    except Exception:
         pass
     return 1400.0, 0.0
 
@@ -667,15 +742,22 @@ def fetch_single_dividend(ticker):
         try: 
             info = stock.info
             if 'exDividendDate' in info and info['exDividendDate'] is not None:
-                ed_dt = datetime.datetime.fromtimestamp(info['exDividendDate'])
+                # 🔧 타임존 안전 변환: UTC 기준으로 파싱 → KST로 변환 후 날짜 추출
+                # (로컬 타임존에 의존하던 기존 fromtimestamp()는 Streamlit Cloud(UTC)에서
+                #  한국 날짜와 하루 차이 발생 가능)
+                ed_dt = datetime.datetime.fromtimestamp(
+                    info['exDividendDate'], tz=datetime.timezone.utc
+                ).astimezone(pytz.timezone('Asia/Seoul'))
                 ex_date = ed_dt.strftime('%Y-%m-%d')
-        except: pass
+        except Exception:
+            pass
         
         divs = hist[hist['Dividends'] > 0]['Dividends'] if 'Dividends' in hist.columns else pd.Series(dtype=float)
         last_div_date = divs.index[-1] if not divs.empty else None
         
         return ticker, divs, ex_date, last_div_date
-    except: return ticker, pd.Series(dtype=float), None, None
+    except Exception:
+        return ticker, pd.Series(dtype=float), None, None
 
 @st.cache_data(ttl=86400) 
 def get_all_dividend_history(tickers_tuple):
@@ -687,13 +769,243 @@ def get_all_dividend_history(tickers_tuple):
             results[ticker] = {"divs": divs, "ex_date": ex_date, "last_div_date": last_div_date}
     return results
 
+
+# ============================================================
+# 💰 자금흐름 자동 추론 (입금/출금 자동 감지)
+# ============================================================
+# 규칙:
+#   • 입금: 매도 없이(가용 매도대금 부족) 30만원 이상 매수 → 부족분을 입금으로 감지
+#   • 출금: 매도 후 영업일 기준 2일 이상 재투자 없음 → 가상잔고를 출금으로 감지
+#   • 시작원금 = 시작일 총자산 − 시작일 실현손익(배당 포함)
+#   • 3/14 이전 거래는 무시 (사용자 투자 시작일 기준)
+# ============================================================
+
+DEPOSIT_THRESHOLD_KRW = 300_000        # 입금 판정 최소 금액
+WITHDRAW_BDAYS_THRESHOLD = 2           # 출금 판정 영업일 기준
+
+def infer_cash_flows(df_tx, df_pnl, usd_krw_rate, start_date):
+    """
+    거래내역 + 실현손익으로부터 입금/출금 이벤트를 자동 추론한다.
+
+    Parameters
+    ----------
+    df_tx : pd.DataFrame
+        거래내역 원본 (정규화 전/후 모두 OK)
+    df_pnl : pd.DataFrame
+        실현손익 원본 (배당 포함)
+    usd_krw_rate : float
+        현재 USD/KRW 환율 (과거 거래도 이 환율로 단순 환산)
+    start_date : pd.Timestamp
+        시뮬레이션 시작일 (naive datetime). 이 날짜 이전 거래는 무시.
+
+    Returns
+    -------
+    events_df : pd.DataFrame
+        columns = ['날짜', '구분', '금액(원)', '메모']
+        구분 ∈ {'입금', '출금'}
+    """
+    empty = pd.DataFrame(columns=['날짜', '구분', '금액(원)', '메모'])
+
+    if df_tx is None or df_tx.empty:
+        return empty
+
+    # ---- 거래내역 파싱 ----
+    tx = df_tx.copy()
+    needed_cols = ['날짜', '거래종류', '수량', '거래단가', '통화', '종목명']
+    for c in needed_cols:
+        if c not in tx.columns:
+            tx[c] = '' if c in ('거래종류', '통화', '종목명') else 0
+
+    tx['날짜'] = pd.to_datetime(tx['날짜'], errors='coerce', utc=False)
+    if getattr(tx['날짜'].dtype, 'tz', None) is not None:
+        tx['날짜'] = tx['날짜'].dt.tz_localize(None)
+    tx = tx.dropna(subset=['날짜'])
+
+    # 시작일 이전/당일 거래 제거 — 시작일 당일까지는 이미 start_capital에 반영됨
+    # (시작원금 = 시작일 총자산 − 시작일 실현손익)
+    tx = tx[tx['날짜'] > start_date].copy()
+    if tx.empty:
+        return empty
+
+    tx['수량'] = pd.to_numeric(tx['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    tx['거래단가'] = pd.to_numeric(tx['거래단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    tx['거래종류'] = tx['거래종류'].astype(str).str.strip()
+    tx['통화'] = tx['통화'].astype(str).str.upper().str.strip()
+    tx['금액_원'] = tx['수량'] * tx['거래단가'] * tx['통화'].map(
+        lambda c: usd_krw_rate if c == 'USD' else 1.0
+    )
+
+    # ---- 실현손익(배당 포함) 파싱 ----
+    # 배당/매도 수익금은 "가상잔고"에 추가로 쌓임
+    pnl_events = []  # list of (날짜, 금액_원)
+    if df_pnl is not None and not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
+        pnl = df_pnl.copy()
+        pnl['날짜'] = pd.to_datetime(pnl['날짜'], errors='coerce', utc=False)
+        if getattr(pnl['날짜'].dtype, 'tz', None) is not None:
+            pnl['날짜'] = pnl['날짜'].dt.tz_localize(None)
+        pnl['실현손익(원)'] = pd.to_numeric(pnl['실현손익(원)'], errors='coerce').fillna(0)
+        pnl = pnl.dropna(subset=['날짜'])
+        # 시작일 당일 배당은 이미 start_capital 계산에서 차감됨 → 시뮬레이션에서는 제외
+        pnl = pnl[pnl['날짜'] > start_date]
+        # 배당은 가상잔고에 추가, 매도 실현손익은 이미 매도 거래 금액에 반영되므로
+        # 여기서는 "배당만" 추가 현금 유입으로 취급
+        if '분류' in pnl.columns:
+            dividends = pnl[pnl['분류'].astype(str).str.strip() == '배당']
+        elif '매도수량' in pnl.columns:
+            # 분류 컬럼이 없으면 매도수량=0인 행을 배당으로 간주
+            _ms = pd.to_numeric(pnl['매도수량'], errors='coerce').fillna(1)
+            dividends = pnl[_ms == 0]
+        else:
+            dividends = pnl.iloc[0:0]
+
+        for _, r in dividends.iterrows():
+            curr = str(r.get('통화', 'KRW')).upper().strip() if '통화' in pnl.columns else 'KRW'
+            # 실현손익 시트의 '실현손익(원)'은 이미 원화라고 가정 (구조 정의상 '원')
+            # 단, USD 배당이 원화로 변환되어 기록됐는지 확인 필요. 현재는 원화값 그대로 사용
+            amt = float(r['실현손익(원)'])
+            if amt > 0:
+                pnl_events.append((pd.Timestamp(r['날짜']).normalize(), amt))
+
+    # ---- 이벤트를 날짜별로 집계 ----
+    # 같은 날: 배당 입금 → 매도 → 매수 순서로 처리 (가용현금 우선 확보)
+    tx['날짜_only'] = tx['날짜'].dt.normalize()
+
+    # 모든 이벤트 날짜 수집
+    all_dates = sorted(set(tx['날짜_only'].unique()) | set(d for d, _ in pnl_events))
+
+    # 날짜별 배당금, 매도금, 매수금
+    sells_by_date = tx[tx['거래종류'] == '매도'].groupby('날짜_only')['금액_원'].sum()
+    buys_by_date = tx[tx['거래종류'] == '매수'].groupby('날짜_only')['금액_원'].sum()
+    dividends_by_date = {}
+    for d, a in pnl_events:
+        dividends_by_date[d] = dividends_by_date.get(d, 0.0) + a
+
+    # ---- 시뮬레이션 ----
+    virtual_cash = 0.0
+    last_sell_date = None  # 마지막 "잔금이 남은" 매도 날짜
+    events = []
+
+    for d in all_dates:
+        # 1) 배당 입금 (가상잔고 증가)
+        if d in dividends_by_date:
+            virtual_cash += dividends_by_date[d]
+
+        # 2) 매도 (가상잔고 증가)
+        if d in sells_by_date.index:
+            virtual_cash += float(sells_by_date.loc[d])
+            last_sell_date = d  # 매도 발생 → 타이머 리셋
+
+        # 3) 매수 (가상잔고 차감, 부족시 입금 감지)
+        if d in buys_by_date.index:
+            buy_amt = float(buys_by_date.loc[d])
+            if buy_amt <= virtual_cash + 1e-6:
+                # 정상 재투자
+                virtual_cash -= buy_amt
+            else:
+                shortage = buy_amt - virtual_cash
+                if shortage >= DEPOSIT_THRESHOLD_KRW:
+                    # 입금 감지
+                    events.append({
+                        '날짜': d,
+                        '구분': '입금',
+                        '금액(원)': round(shortage),
+                        '메모': f"매수 {buy_amt:,.0f}원 − 가용현금 {virtual_cash:,.0f}원"
+                    })
+                # 부족분이 임계값 미만이면 "노이즈로 간주, 그냥 0으로"
+                virtual_cash = 0.0
+            # 매수가 발생하면 마지막 매도 타이머 의미 없음 (재투자됨)
+            if virtual_cash < DEPOSIT_THRESHOLD_KRW:
+                last_sell_date = None
+
+        # 4) 출금 감지: 매도 후 영업일 2일 이상 미재투자 & 가상잔고 존재
+        if last_sell_date is not None and virtual_cash >= DEPOSIT_THRESHOLD_KRW:
+            # d로부터 last_sell_date까지 영업일 수 계산
+            bdays_passed = len(pd.bdate_range(last_sell_date, d)) - 1  # 매도일 제외
+            if bdays_passed >= WITHDRAW_BDAYS_THRESHOLD:
+                # 출금 확정: 잔고 전체를 출금으로 기록
+                events.append({
+                    '날짜': d,
+                    '구분': '출금',
+                    '금액(원)': round(virtual_cash),
+                    '메모': f"매도 후 {bdays_passed}영업일 재투자 없음"
+                })
+                virtual_cash = 0.0
+                last_sell_date = None
+
+    # 시뮬레이션 종료 시점에 남은 가상잔고: 
+    # 오늘 기준으로도 영업일 2일 넘게 미재투자면 출금으로 확정, 아니면 보류
+    if virtual_cash >= DEPOSIT_THRESHOLD_KRW and last_sell_date is not None:
+        today = pd.Timestamp(datetime.datetime.now(pytz.timezone('Asia/Seoul')).date())
+        bdays_passed = len(pd.bdate_range(last_sell_date, today)) - 1
+        if bdays_passed >= WITHDRAW_BDAYS_THRESHOLD:
+            events.append({
+                '날짜': today,
+                '구분': '출금',
+                '금액(원)': round(virtual_cash),
+                '메모': f"매도 후 {bdays_passed}영업일 재투자 없음 (현재 시점)"
+            })
+
+    if not events:
+        return empty
+
+    return pd.DataFrame(events).sort_values('날짜').reset_index(drop=True)
+
+
+def compute_capital_timeline(df_history_sorted, events_df, start_capital):
+    """
+    일별 누적원금 시리즈를 생성한다.
+
+    Parameters
+    ----------
+    df_history_sorted : pd.DataFrame
+        '날짜' 컬럼이 있는 일별기록 (날짜순 정렬됨)
+    events_df : pd.DataFrame
+        infer_cash_flows 결과
+    start_capital : float
+        시작원금 (원)
+
+    Returns
+    -------
+    pd.Series (index=날짜, value=해당 날짜까지의 누적원금)
+    """
+    if df_history_sorted.empty:
+        return pd.Series(dtype=float)
+
+    # 날짜별 순 자금유입 (입금 +, 출금 −)
+    if events_df is None or events_df.empty:
+        delta_by_date = pd.Series(dtype=float)
+    else:
+        ev = events_df.copy()
+        ev['부호있는금액'] = ev.apply(
+            lambda r: r['금액(원)'] if r['구분'] == '입금' else -r['금액(원)'],
+            axis=1
+        )
+        delta_by_date = ev.groupby('날짜')['부호있는금액'].sum()
+
+    # 일별기록의 각 날짜에 대해 "그 날짜까지의 누적유입" 계산
+    dates = df_history_sorted['날짜']
+    capitals = []
+    cum_inflow = 0.0
+    event_dates_sorted = sorted(delta_by_date.index) if not delta_by_date.empty else []
+    event_idx = 0
+    for d in dates:
+        # 해당 날짜까지의 모든 이벤트 누적
+        while event_idx < len(event_dates_sorted) and event_dates_sorted[event_idx] <= d:
+            cum_inflow += float(delta_by_date.loc[event_dates_sorted[event_idx]])
+            event_idx += 1
+        capitals.append(start_capital + cum_inflow)
+
+    return pd.Series(capitals, index=dates.values)
+
+
 def interpret_indicator(title, actual, forecast):
     if not actual or str(actual) == '-': return "⏳ 발표 대기중"
     if not forecast or str(forecast) == '-': return "➖ 단순 발표 (예상치 없음)"
     try:
         act_val = float(re.sub(r'[^\d.-]', '', str(actual)))
         for_val = float(re.sub(r'[^\d.-]', '', str(forecast)))
-    except: return "✅ 발표 완료"
+    except Exception:
+        return "✅ 발표 완료"
     
     diff = act_val - for_val
     t = title.lower()
@@ -761,27 +1073,46 @@ def get_economic_calendar():
                     "이전": previous,
                     "AI 해석": interpretation
                 })
-            except: continue
+            except Exception:
+                continue
             
         df = pd.DataFrame(records)
         if not df.empty:
             df = df.sort_values(by="일시", ascending=False)
         return df
-    except: return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
 def fetch_high_prices(tickers_tuple):
+    """1년 최고가 조회 — 병렬화 (6종목 × ~1초 → ~1초)"""
     high_prices = {}
-    for ticker in tickers_tuple:
+    if not tickers_tuple:
+        return high_prices
+
+    def _fetch_one(ticker):
         try:
             hist = yf.Ticker(ticker).history(period="1y")
-            high_prices[ticker] = float(hist['High'].max())
-        except: high_prices[ticker] = 0.0
+            if hist is None or hist.empty or 'High' not in hist.columns:
+                return ticker, 0.0
+            return ticker, float(hist['High'].max())
+        except Exception:
+            return ticker, 0.0
+
+    with ThreadPoolExecutor(max_workers=max(1, min(len(tickers_tuple), 10))) as ex:
+        futs = {ex.submit(_fetch_one, t): t for t in tickers_tuple}
+        for fut in as_completed(futs):
+            t, hp = fut.result()
+            high_prices[t] = hp
     return high_prices
 
 def fetch_current_prices_for_drawdown(tickers_tuple):
     current_prices = {}
-    with ThreadPoolExecutor(max_workers=len(tickers_tuple)) as executor:
+    if not tickers_tuple:
+        return current_prices
+    # 🔧 max_workers=0 방어 (빈 튜플 시 ValueError 방지) + 상한 설정
+    workers = max(1, min(len(tickers_tuple), 10))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(fetch_single_price, t): t for t in tickers_tuple}
         for future in as_completed(futures):
             ticker, price, _ = future.result()
@@ -829,13 +1160,15 @@ def create_drawdown_table(current_prices, high_prices):
 def style_drawdown_table(df):
     display_df = df.drop(columns=['_curr_raw', '_high_raw'])
     
-    def get_styles(data):
+    def get_styles(_ignored):
+        # 🔧 df(raw 값 포함)를 클로저로 사용 — display_df에는 _raw 컬럼이 없으므로
+        # pandas가 건네주는 data 대신 외부 df를 의도적으로 참조
         styles_df = pd.DataFrame('', index=display_df.index, columns=display_df.columns)
         levels = [-5, -10, -15, -20, -25, -30, -35, -40]
         
-        for i in data.index:
-            curr = data.loc[i, '_curr_raw']
-            high = data.loc[i, '_high_raw']
+        for i in df.index:
+            curr = df.loc[i, '_curr_raw']
+            high = df.loc[i, '_high_raw']
             
             closest_col = None
             min_diff = float('inf')
@@ -857,7 +1190,7 @@ def style_drawdown_table(df):
             
         return styles_df
         
-    return display_df.style.apply(lambda x: get_styles(df), axis=None).set_properties(**{'text-align': 'center'})
+    return display_df.style.apply(get_styles, axis=None).set_properties(**{'text-align': 'center'})
 
 
 # -------------------------- UI 렌더링 --------------------------
@@ -1071,12 +1404,42 @@ else:
     with tab_chart2:
         if not df_history.empty and df_history.shape[1] >= 2:
             df_h = df_history.copy()
-            df_h['날짜'] = pd.to_datetime(df_h['날짜'], errors='coerce')
+            # naive datetime64로 통일
+            df_h['날짜'] = pd.to_datetime(df_h['날짜'], errors='coerce', utc=False)
+            if getattr(df_h['날짜'].dtype, 'tz', None) is not None:
+                df_h['날짜'] = df_h['날짜'].dt.tz_localize(None)
             df_h = df_h.dropna(subset=['날짜']).sort_values('날짜').reset_index(drop=True)
             df_h['총자산(원)'] = pd.to_numeric(df_h[df_h.columns[1]], errors='coerce').fillna(0)
-            df_h['총자산(만원)'] = df_h['총자산(원)'] / 10000
 
-            # 🆕 오늘 실시간 자산을 마지막 점으로 추가 (기록 갭 제거)
+            # ---- 시작일 및 시작원금 계산 ----
+            # 시작일 = 일별기록의 첫 날 (3/14 가정)
+            start_date = df_h['날짜'].iloc[0]
+
+            # 시작일 당일의 실현손익(배당 포함) 합계
+            start_day_realized = 0.0
+            if not df_pnl_raw.empty and '실현손익(원)' in df_pnl_raw.columns:
+                _p = df_pnl_raw.copy()
+                _p['날짜'] = pd.to_datetime(_p['날짜'], errors='coerce', utc=False)
+                if getattr(_p['날짜'].dtype, 'tz', None) is not None:
+                    _p['날짜'] = _p['날짜'].dt.tz_localize(None)
+                _p['실현손익(원)'] = pd.to_numeric(_p['실현손익(원)'], errors='coerce').fillna(0)
+                _p = _p.dropna(subset=['날짜'])
+                # 시작일 당일 실현손익만
+                start_day_realized = float(
+                    _p[_p['날짜'].dt.normalize() == start_date.normalize()]['실현손익(원)'].sum()
+                )
+
+            # 시작원금 = 시작일 총자산 − 시작일 당일 실현손익
+            start_capital = max(float(df_h['총자산(원)'].iloc[0]) - start_day_realized, 1.0)
+
+            # ---- 자금흐름 자동 추론 ----
+            events_df = infer_cash_flows(
+                df_raw, df_pnl_raw,
+                usd_krw_rate=usd_krw_price,
+                start_date=start_date
+            )
+
+            # ---- 오늘 실시간 자산을 마지막 점으로 추가 ----
             kst_now = datetime.datetime.now(pytz.timezone('Asia/Seoul'))
             today_date = pd.Timestamp(kst_now.date())
             last_record_date = df_h['날짜'].iloc[-1] if not df_h.empty else None
@@ -1084,127 +1447,254 @@ else:
                 today_row = pd.DataFrame({
                     '날짜': [today_date],
                     '총자산(원)': [total_asset],
-                    '총자산(만원)': [total_asset / 10000],
                 })
-                # 기존 df_h의 다른 컬럼과 호환되도록 누락 컬럼 채움
                 for col in df_h.columns:
                     if col not in today_row.columns:
                         today_row[col] = np.nan
                 df_h = pd.concat([df_h, today_row[df_h.columns]], ignore_index=True)
 
-            # 실현손익 누적 합산 (날짜별로 df_pnl 집계)
-            cumul_pnl_val = 0.0
-            if not df_pnl_raw.empty and '실현손익(원)' in df_pnl_raw.columns:
-                pnl_tmp = df_pnl_raw.copy()
-                pnl_tmp['날짜'] = pd.to_datetime(pnl_tmp['날짜'], errors='coerce')
-                pnl_tmp['실현손익(원)'] = pd.to_numeric(pnl_tmp['실현손익(원)'], errors='coerce').fillna(0)
-                pnl_tmp = pnl_tmp.dropna(subset=['날짜'])
-                pnl_daily = pnl_tmp.groupby('날짜')['실현손익(원)'].sum().sort_index().cumsum().reset_index()
-                pnl_daily.columns = ['날짜', '누적실현손익(원)']
-                # merge_asof로 O(N log N) 매핑 (행마다 필터링 대신)
-                df_h = pd.merge_asof(
-                    df_h.sort_values('날짜'),
-                    pnl_daily.sort_values('날짜'),
-                    on='날짜', direction='backward'
-                )
-                df_h['누적실현손익(원)'] = df_h['누적실현손익(원)'].fillna(0)
-                cumul_pnl_val = df_h['누적실현손익(원)'].iloc[-1] if not df_h.empty else 0.0
-            else:
-                df_h['누적실현손익(원)'] = 0.0
+            df_h['총자산(만원)'] = df_h['총자산(원)'] / 10000
 
-            # 진짜 자산 = 현재 보유 평가액 + 이미 실현한 손익
-            df_h['총자산+실현(원)'] = df_h['총자산(원)'] + df_h['누적실현손익(원)']
-            df_h['총자산+실현(만원)'] = df_h['총자산+실현(원)'] / 10000
+            # ---- 누적원금 시리즈 생성 (계단선) ----
+            capital_series = compute_capital_timeline(df_h[['날짜']], events_df, start_capital)
+            df_h['누적원금(원)'] = capital_series.values
+            df_h['누적원금(만원)'] = df_h['누적원금(원)'] / 10000
 
-            # 시작 원금 추정: 첫날 총자산 - 첫날까지의 누적 실현손익
-            start_asset = df_h['총자산(원)'].iloc[0]
-            start_pnl = df_h['누적실현손익(원)'].iloc[0]
-            seed_money = max(start_asset - start_pnl, 1)  # 음수/0 방지
-            seed_money_man = seed_money / 10000
+            # ---- 성과 계산 ----
+            df_h['수익(원)'] = df_h['총자산(원)'] - df_h['누적원금(원)']
+            df_h['수익률(%)'] = (df_h['수익(원)'] / df_h['누적원금(원)'] * 100).replace([np.inf, -np.inf], 0).fillna(0)
 
-            # 고점, MDD 계산 (총자산+실현 기준)
-            df_h['고점(원)'] = df_h['총자산+실현(원)'].cummax()
-            df_h['낙폭(%)'] = ((df_h['총자산+실현(원)'] - df_h['고점(원)']) / df_h['고점(원)'] * 100).fillna(0)
-            mdd_pct = df_h['낙폭(%)'].min()
-            mdd_idx = df_h['낙폭(%)'].idxmin()
+            # ---- MDD: 수익률 기준으로 계산 (입금/출금으로 인한 거짓 낙폭 방지) ----
+            df_h['수익률_고점(%)'] = df_h['수익률(%)'].cummax()
+            df_h['낙폭(%)'] = df_h['수익률(%)'] - df_h['수익률_고점(%)']
+            mdd_pct = float(df_h['낙폭(%)'].min()) if not df_h.empty else 0.0
+            mdd_idx = df_h['낙폭(%)'].idxmin() if not df_h.empty else None
             mdd_date = df_h.loc[mdd_idx, '날짜'].strftime('%Y-%m-%d') if mdd_idx is not None else '-'
 
-            peak_val = df_h['총자산+실현(원)'].max()
-            peak_idx = df_h['총자산+실현(원)'].idxmax()
-            peak_date = df_h.loc[peak_idx, '날짜'].strftime('%Y-%m-%d')
+            peak_return = float(df_h['수익률(%)'].max()) if not df_h.empty else 0.0
+            peak_idx = df_h['수익률(%)'].idxmax() if not df_h.empty else None
+            peak_date = df_h.loc[peak_idx, '날짜'].strftime('%Y-%m-%d') if peak_idx is not None else '-'
 
-            curr_total = df_h['총자산+실현(원)'].iloc[-1]
-            total_return_pct = ((curr_total - seed_money) / seed_money * 100) if seed_money > 0 else 0
+            # ---- 현재 시점 성과 ----
+            curr_total = float(df_h['총자산(원)'].iloc[-1])
+            curr_capital = float(df_h['누적원금(원)'].iloc[-1])
+            curr_profit = curr_total - curr_capital
+            curr_return_pct = (curr_profit / curr_capital * 100) if curr_capital > 0 else 0.0
 
-            # 지표 카드 표시
+            # 실현손익 누적 (정보성 지표용)
+            cumul_realized = 0.0
+            if not df_pnl_raw.empty and '실현손익(원)' in df_pnl_raw.columns:
+                _p2 = df_pnl_raw.copy()
+                _p2['날짜'] = pd.to_datetime(_p2['날짜'], errors='coerce', utc=False)
+                if getattr(_p2['날짜'].dtype, 'tz', None) is not None:
+                    _p2['날짜'] = _p2['날짜'].dt.tz_localize(None)
+                _p2['실현손익(원)'] = pd.to_numeric(_p2['실현손익(원)'], errors='coerce').fillna(0)
+                _p2 = _p2.dropna(subset=['날짜'])
+                cumul_realized = float(_p2[_p2['날짜'] >= start_date]['실현손익(원)'].sum())
+            unrealized = curr_profit - cumul_realized
+
+            # 감지된 입금/출금 횟수
+            n_deposits = int((events_df['구분'] == '입금').sum()) if not events_df.empty else 0
+            n_withdrawals = int((events_df['구분'] == '출금').sum()) if not events_df.empty else 0
+
+            # ---- 지표 카드 ----
             cols_metric = st.columns(4)
             with cols_metric[0]:
-                st.metric("💰 시작 원금", f"{seed_money_man:,.0f}만원")
+                deposit_label = f"입금 {n_deposits}회" if n_deposits > 0 else "추가 투입 없음"
+                if n_withdrawals > 0:
+                    deposit_label += f" / 출금 {n_withdrawals}회"
+                st.metric("💰 누적 원금", f"{curr_capital/10000:,.0f}만원", delta=deposit_label, delta_color="off")
             with cols_metric[1]:
-                st.metric("📈 누적 수익률", f"{total_return_pct:+,.1f}%",
-                          delta=f"실현손익 {cumul_pnl_val/10000:+,.0f}만원 포함")
+                sign = "+" if curr_profit >= 0 else ""
+                st.metric("📈 총 수익", f"{sign}{curr_profit/10000:,.0f}만원",
+                          delta=f"미실현 {unrealized/10000:+,.0f}만 / 실현 {cumul_realized/10000:+,.0f}만",
+                          delta_color="off")
             with cols_metric[2]:
-                st.metric("🏔️ 고점", f"{peak_val/10000:,.0f}만원",
-                          delta=f"{peak_date}")
+                st.metric("📊 수익률", f"{curr_return_pct:+,.2f}%",
+                          delta=f"고점 {peak_return:+.1f}% ({peak_date})",
+                          delta_color="off")
             with cols_metric[3]:
-                st.metric("📉 MDD", f"{mdd_pct:,.1f}%",
+                st.metric("📉 MDD", f"{mdd_pct:,.2f}%p",
                           delta=f"{mdd_date}", delta_color="inverse")
 
-            # 차트: 총자산 vs 총자산+실현손익
-            df_h['날짜_str'] = df_h['날짜'].dt.strftime('%Y-%m-%d')
+            # ---- 차트 ----
+            # 수익/손실 영역 분리를 위해 누적원금 선과 총자산 선 사이를 채색
+            # Plotly는 fill='tonexty'로 직전 trace와의 영역 채움
+            profit_fill = "rgba(255, 153, 153, 0.18)" if is_dark_mode else "rgba(230, 57, 70, 0.12)"
+            loss_fill = "rgba(153, 204, 255, 0.18)" if is_dark_mode else "rgba(69, 123, 157, 0.12)"
 
             fig_line = go.Figure()
 
-            # 총자산+실현(진짜 성과)
+            # 1) 누적원금 (계단선) - 기준선 역할, 먼저 그림
             fig_line.add_trace(go.Scatter(
-                x=df_h['날짜_str'], y=df_h['총자산+실현(만원)'],
-                mode='lines+markers', name='총자산+실현손익',
+                x=df_h['날짜'], y=df_h['누적원금(만원)'],
+                mode='lines', name='누적 원금',
+                line=dict(color=gold_highlight, width=2, shape='hv'),  # hv = 계단식
+                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>누적 원금: %{y:,.0f}만원<extra></extra>',
+            ))
+
+            # 2) 총자산선 — 누적원금선과의 영역을 채움 (tonexty)
+            # 수익 구간(자산 > 원금)과 손실 구간 구분을 위해 두 번 그림
+            df_h_profit = df_h['총자산(만원)'].where(df_h['총자산(원)'] >= df_h['누적원금(원)'], df_h['누적원금(만원)'])
+            df_h_loss = df_h['총자산(만원)'].where(df_h['총자산(원)'] < df_h['누적원금(원)'], df_h['누적원금(만원)'])
+
+            # 수익 영역 (위쪽) — 연한 초록/분홍
+            fig_line.add_trace(go.Scatter(
+                x=df_h['날짜'], y=df_h_profit,
+                mode='none', name='수익 구간',
+                fill='tonexty', fillcolor=profit_fill,
+                hoverinfo='skip', showlegend=False,
+            ))
+
+            # 3) 누적원금을 다시 그리되 손실 채색용 앵커로 사용
+            fig_line.add_trace(go.Scatter(
+                x=df_h['날짜'], y=df_h['누적원금(만원)'],
+                mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+                hoverinfo='skip', showlegend=False,
+            ))
+            # 손실 영역 (아래쪽)
+            fig_line.add_trace(go.Scatter(
+                x=df_h['날짜'], y=df_h_loss,
+                mode='none', name='손실 구간',
+                fill='tonexty', fillcolor=loss_fill,
+                hoverinfo='skip', showlegend=False,
+            ))
+
+            # 4) 총자산 실선 (메인)
+            fig_line.add_trace(go.Scatter(
+                x=df_h['날짜'], y=df_h['총자산(만원)'],
+                mode='lines+markers', name='총 자산',
                 line=dict(color=line_color, width=2.5),
-                marker=dict(color=line_color, size=5),
+                marker=dict(color=line_color, size=4),
+                customdata=np.stack([df_h['수익률(%)'], df_h['수익(원)']/10000], axis=-1),
+                hovertemplate=(
+                    '<b>%{x|%Y-%m-%d}</b><br>'
+                    '총자산: %{y:,.0f}만원<br>'
+                    '수익: %{customdata[1]:+,.0f}만원 (%{customdata[0]:+.2f}%)<extra></extra>'
+                ),
             ))
-            # 보유 평가액만
-            fig_line.add_trace(go.Scatter(
-                x=df_h['날짜_str'], y=df_h['총자산(만원)'],
-                mode='lines', name='보유 평가액',
-                line=dict(color='gray', width=1, dash='dot'),
-                opacity=0.6,
-            ))
-            # 시작 원금 기준선
-            fig_line.add_hline(y=seed_money_man, line_dash="dash",
-                               line_color=gold_highlight, opacity=0.5,
-                               annotation_text=f"시작 원금 {seed_money_man:,.0f}만",
-                               annotation_position="top left",
-                               annotation_font_color=gold_highlight)
-            # 고점 표시
-            fig_line.add_hline(y=peak_val/10000, line_dash="dot",
-                               line_color=profit_up_color, opacity=0.3,
-                               annotation_text=f"고점 {peak_val/10000:,.0f}만",
-                               annotation_position="top right",
-                               annotation_font_color=profit_up_color)
+
+            # 5) 마지막 점 강조 (현재 위치)
+            if not df_h.empty:
+                last_x = df_h['날짜'].iloc[-1]
+                last_y = df_h['총자산(만원)'].iloc[-1]
+                fig_line.add_trace(go.Scatter(
+                    x=[last_x], y=[last_y],
+                    mode='markers+text', showlegend=False,
+                    marker=dict(color=line_color, size=11, line=dict(color='white', width=2)),
+                    text=[f" {last_y:,.0f}만 ({curr_return_pct:+.1f}%)"],
+                    textposition='middle right',
+                    textfont=dict(color=line_color, size=12, family="Arial Black"),
+                    hoverinfo='skip',
+                ))
+
+            # 6) 입금/출금 이벤트 annotation (차트 상단)
+            if not events_df.empty:
+                for _, ev in events_df.iterrows():
+                    ev_date = ev['날짜']
+                    ev_type = ev['구분']
+                    ev_amt = ev['금액(원)'] / 10000
+                    # 이벤트 날짜가 차트 범위 밖이면 스킵
+                    if ev_date < df_h['날짜'].iloc[0] or ev_date > df_h['날짜'].iloc[-1]:
+                        continue
+                    arrow_color = profit_up_color if ev_type == '입금' else profit_down_color
+                    symbol = '▲' if ev_type == '입금' else '▼'
+                    fig_line.add_annotation(
+                        x=ev_date, y=1, yref='paper',
+                        text=f"{symbol} {ev_type} {ev_amt:,.0f}만",
+                        showarrow=False,
+                        font=dict(color=arrow_color, size=10, family="Arial Black"),
+                        bgcolor="rgba(0,0,0,0.3)" if is_dark_mode else "rgba(255,255,255,0.8)",
+                        bordercolor=arrow_color, borderwidth=1, borderpad=2,
+                        yshift=5,
+                    )
+                    # 해당 날짜 수직선
+                    fig_line.add_vline(x=ev_date, line_dash="dot", line_color=arrow_color, opacity=0.3)
+
+            # 7) MDD 발생 지점 마커
+            if mdd_idx is not None and mdd_pct < -0.01:
+                mdd_x = df_h.loc[mdd_idx, '날짜']
+                mdd_y = df_h.loc[mdd_idx, '총자산(만원)']
+                fig_line.add_trace(go.Scatter(
+                    x=[mdd_x], y=[mdd_y],
+                    mode='markers', showlegend=False,
+                    marker=dict(color=profit_down_color, size=10, symbol='triangle-down',
+                                line=dict(color='white', width=1.5)),
+                    hovertemplate=f'<b>MDD {mdd_pct:.2f}%p</b><br>{mdd_date}<extra></extra>',
+                ))
 
             fig_line.update_layout(
                 template=chart_template,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                margin=dict(t=30, b=10, l=10, r=10),
+                margin=dict(t=50, b=10, l=10, r=80),  # 오른쪽 여백 늘려서 마지막 라벨 표시
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                yaxis_title="만원",
+                yaxis=dict(title="만원", tickformat=",.0f"),
+                xaxis=dict(
+                    type='date',
+                    rangeselector=dict(
+                        buttons=list([
+                            dict(count=1, label="1M", step="month", stepmode="backward"),
+                            dict(count=3, label="3M", step="month", stepmode="backward"),
+                            dict(count=6, label="6M", step="month", stepmode="backward"),
+                            dict(count=1, label="1Y", step="year", stepmode="backward"),
+                            dict(step="all", label="All"),
+                        ]),
+                        bgcolor="rgba(80,80,80,0.3)" if is_dark_mode else "rgba(230,230,230,0.8)",
+                        font=dict(size=10),
+                    ),
+                ),
+                hovermode='x unified',
             )
             st.plotly_chart(fig_line, use_container_width=True)
-            st.caption("※ '총자산+실현손익'은 현재 보유 평가액에 과거 매도/배당 실현손익을 더한 진짜 투자 성과입니다.")
+
+            # ---- 자동 감지된 자금흐름 expander ----
+            with st.expander(f"🔍 자동 감지된 자금흐름 ({len(events_df)}건)"):
+                if events_df.empty:
+                    st.caption("감지된 입금/출금이 없습니다. (전액 재투자 흐름)")
+                else:
+                    display_ev = events_df.copy()
+                    display_ev['날짜'] = display_ev['날짜'].dt.strftime('%Y-%m-%d')
+                    display_ev['금액(원)'] = display_ev['금액(원)'].apply(lambda v: f"{v:+,.0f}" if v else "0")
+                    # 입금은 + 부호, 출금은 − 부호 명시
+                    def _signed(row):
+                        amt = row['금액(원)'].replace(',', '').replace('+', '')
+                        if row['구분'] == '출금':
+                            return f"−{amt}" if not amt.startswith('-') else amt
+                        return f"+{amt}"
+                    display_ev['금액(원)'] = display_ev.apply(_signed, axis=1)
+                    st.dataframe(
+                        display_ev,
+                        use_container_width=True, hide_index=True,
+                    )
+                st.caption(
+                    f"📌 **감지 규칙**: "
+                    f"매도 없이 **{DEPOSIT_THRESHOLD_KRW:,.0f}원 이상** 매수 시 부족분을 입금으로, "
+                    f"매도 후 **영업일 {WITHDRAW_BDAYS_THRESHOLD}일 이상** 재투자 없으면 잔액을 출금으로 판정합니다. "
+                    f"USD 거래는 현재 환율({usd_krw_price:,.1f}원)로 단순 환산했습니다."
+                )
+
+            st.caption(
+                "※ **수익률** = (총자산 − 누적원금) ÷ 누적원금. "
+                "입금/출금은 수익으로 집계되지 않고 원금 계단선(금색)에 반영됩니다. "
+                "**MDD**는 수익률 기준으로 계산하여 입금/출금으로 인한 거짓 낙폭을 배제합니다."
+            )
 
     with tab_chart3:
-        if not df_pnl.empty and '실현손익(원)' in df_pnl.columns:
-            df_pnl['실현손익(원)'] = pd.to_numeric(df_pnl['실현손익(원)'], errors='coerce').fillna(0)
-            df_pnl['분류'] = df_pnl.apply(lambda x: x['분류'] if str(x.get('분류', '')).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
-            df_pnl['차트분류'] = df_pnl.apply(lambda x: f"{x['분류']} ({'해외' if x.get('통화')=='USD' else '국내'})", axis=1)
-            df_pnl['실현손익_차트용(만원)'] = (df_pnl['실현손익(원)'] / 10000).fillna(0).astype(int)
+        # 🔧 df_pnl은 이후 다른 탭에서도 참조될 수 있으므로 파괴적 변환 방지
+        # → df_pnl_raw에서 별도 복사본(df_pnl_chart)을 만들어 이 탭에서만 사용
+        if not df_pnl_raw.empty and '실현손익(원)' in df_pnl_raw.columns:
+            df_pnl_chart = df_pnl_raw.copy()
+            df_pnl_chart['실현손익(원)'] = pd.to_numeric(df_pnl_chart['실현손익(원)'], errors='coerce').fillna(0)
+            df_pnl_chart['분류'] = df_pnl_chart.apply(lambda x: x['분류'] if str(x.get('분류', '')).strip() != '' else ('배당' if x.get('매도수량', 1) == 0 else '매도'), axis=1)
+            df_pnl_chart['차트분류'] = df_pnl_chart.apply(lambda x: f"{x['분류']} ({'해외' if x.get('통화')=='USD' else '국내'})", axis=1)
+            df_pnl_chart['실현손익_차트용(만원)'] = (df_pnl_chart['실현손익(원)'] / 10000).fillna(0).astype(int)
             
             period = st.radio("보기 옵션", ["월별", "연별", "일별"], horizontal=True, label_visibility="collapsed")
-            df_pnl['날짜'] = pd.to_datetime(df_pnl['날짜'], errors='coerce')
-            df_pnl = df_pnl.dropna(subset=['날짜'])
-            df_pnl['일자'] = df_pnl['날짜'].dt.strftime('%Y-%m-%d')
-            df_pnl['월'] = df_pnl['날짜'].dt.strftime('%Y-%m')
-            df_pnl['연'] = df_pnl['날짜'].dt.strftime('%Y')
+            df_pnl_chart['날짜'] = pd.to_datetime(df_pnl_chart['날짜'], errors='coerce')
+            df_pnl_chart = df_pnl_chart.dropna(subset=['날짜'])
+            df_pnl_chart['일자'] = df_pnl_chart['날짜'].dt.strftime('%Y-%m-%d')
+            df_pnl_chart['월'] = df_pnl_chart['날짜'].dt.strftime('%Y-%m')
+            df_pnl_chart['연'] = df_pnl_chart['날짜'].dt.strftime('%Y')
             
             def plot_pnl_bar(data, x_col):
                 color_map = {'매도 (국내)': '#FF6B6B', '매도 (해외)': '#FFA07A', '배당 (국내)': '#4DABF7', '배당 (해외)': '#51CF66'}
@@ -1213,9 +1703,9 @@ else:
                 fig.update_layout(template=chart_template, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', margin=dict(t=10, b=10, l=10, r=10), barmode='relative', legend_title_text='')
                 st.plotly_chart(fig, use_container_width=True)
 
-            if period == "월별": plot_pnl_bar(df_pnl.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '월')
-            elif period == "연별": plot_pnl_bar(df_pnl.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '연')
-            else: plot_pnl_bar(df_pnl.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '일자')
+            if period == "월별": plot_pnl_bar(df_pnl_chart.groupby(['월', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '월')
+            elif period == "연별": plot_pnl_bar(df_pnl_chart.groupby(['연', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '연')
+            else: plot_pnl_bar(df_pnl_chart.groupby(['일자', '차트분류'])['실현손익_차트용(만원)'].sum().reset_index(), '일자')
             
     st.markdown("---")
 
@@ -1277,12 +1767,17 @@ else:
                         else: days_to_add = 365
                         
                         est_date = last_div_date + datetime.timedelta(days=days_to_add)
-                        while est_date.strftime('%Y-%m-%d') < today_str:
+                        # 🔧 극단적으로 과거인 last_div_date에서 무한/과도 루프 방지 (상한 120회)
+                        _max_iter = 120
+                        _iter = 0
+                        while est_date.strftime('%Y-%m-%d') < today_str and _iter < _max_iter:
                             est_date += datetime.timedelta(days=days_to_add)
+                            _iter += 1
                             
                         if est_date <= now + datetime.timedelta(days=180):
                             calendar_records.append({"종목명": name, "티커": ticker, "구분": "🤔 예상(AI)", "날짜": est_date.strftime('%Y-%m-%d'), "내용": "배당락일 (추정)"})
-                    except: pass
+                    except Exception:
+                        pass
 
                 if divs.empty: continue
                 is_monthly = len(divs) >= 18
