@@ -1497,128 +1497,181 @@ else:
             n_deposits = int((events_df['구분'] == '입금').sum()) if not events_df.empty else 0
             n_withdrawals = int((events_df['구분'] == '출금').sum()) if not events_df.empty else 0
 
-            # ---- 지표 카드 ----
-            cols_metric = st.columns(4)
-            with cols_metric[0]:
-                deposit_label = f"입금 {n_deposits}회" if n_deposits > 0 else "추가 투입 없음"
-                if n_withdrawals > 0:
-                    deposit_label += f" / 출금 {n_withdrawals}회"
-                st.metric("💰 누적 원금", f"{curr_capital/10000:,.0f}만원", delta=deposit_label, delta_color="off")
-            with cols_metric[1]:
-                sign = "+" if curr_profit >= 0 else ""
-                st.metric("📈 총 수익", f"{sign}{curr_profit/10000:,.0f}만원",
-                          delta=f"미실현 {unrealized/10000:+,.0f}만 / 실현 {cumul_realized/10000:+,.0f}만",
-                          delta_color="off")
-            with cols_metric[2]:
-                st.metric("📊 수익률", f"{curr_return_pct:+,.2f}%",
-                          delta=f"고점 {peak_return:+.1f}% ({peak_date})",
-                          delta_color="off")
-            with cols_metric[3]:
-                st.metric("📉 MDD", f"{mdd_pct:,.2f}%p",
-                          delta=f"{mdd_date}", delta_color="inverse")
+            # ---- 지표 카드 (반응형 2x2 그리드) ----
+            # PC: 4열, 모바일: 2열로 자동 전환 (CSS Grid + auto-fit)
+            profit_sign_color = profit_up_color if curr_profit >= 0 else profit_down_color
+            ret_sign_color = profit_up_color if curr_return_pct >= 0 else profit_down_color
+            mdd_color = profit_down_color if mdd_pct < -0.01 else text_color
 
-            # ---- 차트 ----
+            deposit_label = f"입금 {n_deposits}회" if n_deposits > 0 else "추가 투입 없음"
+            if n_withdrawals > 0:
+                deposit_label += f" · 출금 {n_withdrawals}회"
+
+            sign = "+" if curr_profit >= 0 else ""
+
+            # 공통 카드 CSS
+            card_style = (
+                f"background-color: {df_bg}; border: 1px solid {border_color}; "
+                f"border-radius: 10px; padding: 12px 14px; "
+                f"box-shadow: 0 2px 4px rgba(0,0,0,0.05);"
+            )
+            label_style = f"font-size: 12px; color: gray; margin-bottom: 6px; font-weight: 600;"
+            value_style_big = f"font-size: clamp(18px, 5vw, 26px); font-weight: 800; line-height: 1.1; letter-spacing: -0.3px;"
+            sub_style = f"font-size: 11px; color: gray; margin-top: 4px; line-height: 1.3;"
+
+            st.markdown(f"""
+            <style>
+            .metrics-grid {{
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 8px;
+                margin: 8px 0 14px 0;
+            }}
+            @media (max-width: 640px) {{
+                .metrics-grid {{
+                    grid-template-columns: repeat(2, 1fr);
+                    gap: 6px;
+                }}
+            }}
+            </style>
+            <div class="metrics-grid">
+                <div style="{card_style}">
+                    <div style="{label_style}">💰 누적 원금</div>
+                    <div style="{value_style_big} color: {text_color};">{curr_capital/10000:,.0f}<span style="font-size: 0.6em; font-weight: 600; color: gray;">만원</span></div>
+                    <div style="{sub_style}">{deposit_label}</div>
+                </div>
+                <div style="{card_style}">
+                    <div style="{label_style}">📈 총 수익</div>
+                    <div style="{value_style_big} color: {profit_sign_color};">{sign}{curr_profit/10000:,.0f}<span style="font-size: 0.6em; font-weight: 600; color: gray;">만원</span></div>
+                    <div style="{sub_style}">미실현 {unrealized/10000:+,.0f} · 실현 {cumul_realized/10000:+,.0f}만</div>
+                </div>
+                <div style="{card_style}">
+                    <div style="{label_style}">📊 수익률</div>
+                    <div style="{value_style_big} color: {ret_sign_color};">{curr_return_pct:+,.2f}<span style="font-size: 0.6em; font-weight: 600;">%</span></div>
+                    <div style="{sub_style}">고점 {peak_return:+.1f}% ({peak_date})</div>
+                </div>
+                <div style="{card_style}">
+                    <div style="{label_style}">📉 MDD</div>
+                    <div style="{value_style_big} color: {mdd_color};">{mdd_pct:,.2f}<span style="font-size: 0.6em; font-weight: 600;">%p</span></div>
+                    <div style="{sub_style}">{mdd_date}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ---- 차트 (모바일 최적화) ----
             # 수익/손실 영역 분리를 위해 누적원금 선과 총자산 선 사이를 채색
-            # Plotly는 fill='tonexty'로 직전 trace와의 영역 채움
             profit_fill = "rgba(255, 153, 153, 0.18)" if is_dark_mode else "rgba(230, 57, 70, 0.12)"
             loss_fill = "rgba(153, 204, 255, 0.18)" if is_dark_mode else "rgba(69, 123, 157, 0.12)"
 
             fig_line = go.Figure()
 
-            # 1) 누적원금 (계단선) - 기준선 역할, 먼저 그림
+            # 1) 누적원금 (계단선) - 기준선 역할
             fig_line.add_trace(go.Scatter(
                 x=df_h['날짜'], y=df_h['누적원금(만원)'],
                 mode='lines', name='누적 원금',
-                line=dict(color=gold_highlight, width=2, shape='hv'),  # hv = 계단식
-                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>누적 원금: %{y:,.0f}만원<extra></extra>',
+                line=dict(color=gold_highlight, width=2, shape='hv'),
+                hoverinfo='skip',  # 모바일 툴팁 단순화
             ))
 
-            # 2) 총자산선 — 누적원금선과의 영역을 채움 (tonexty)
-            # 수익 구간(자산 > 원금)과 손실 구간 구분을 위해 두 번 그림
+            # 2) 수익/손실 영역 채색
             df_h_profit = df_h['총자산(만원)'].where(df_h['총자산(원)'] >= df_h['누적원금(원)'], df_h['누적원금(만원)'])
             df_h_loss = df_h['총자산(만원)'].where(df_h['총자산(원)'] < df_h['누적원금(원)'], df_h['누적원금(만원)'])
 
-            # 수익 영역 (위쪽) — 연한 초록/분홍
             fig_line.add_trace(go.Scatter(
                 x=df_h['날짜'], y=df_h_profit,
-                mode='none', name='수익 구간',
-                fill='tonexty', fillcolor=profit_fill,
+                mode='none', fill='tonexty', fillcolor=profit_fill,
                 hoverinfo='skip', showlegend=False,
             ))
-
-            # 3) 누적원금을 다시 그리되 손실 채색용 앵커로 사용
             fig_line.add_trace(go.Scatter(
                 x=df_h['날짜'], y=df_h['누적원금(만원)'],
                 mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
                 hoverinfo='skip', showlegend=False,
             ))
-            # 손실 영역 (아래쪽)
             fig_line.add_trace(go.Scatter(
                 x=df_h['날짜'], y=df_h_loss,
-                mode='none', name='손실 구간',
-                fill='tonexty', fillcolor=loss_fill,
+                mode='none', fill='tonexty', fillcolor=loss_fill,
                 hoverinfo='skip', showlegend=False,
             ))
 
-            # 4) 총자산 실선 (메인)
+            # 3) 총자산 실선 (메인) - 여기에만 hover 정보
             fig_line.add_trace(go.Scatter(
                 x=df_h['날짜'], y=df_h['총자산(만원)'],
                 mode='lines+markers', name='총 자산',
                 line=dict(color=line_color, width=2.5),
                 marker=dict(color=line_color, size=4),
-                customdata=np.stack([df_h['수익률(%)'], df_h['수익(원)']/10000], axis=-1),
+                customdata=np.stack([df_h['수익률(%)'], df_h['수익(원)']/10000, df_h['누적원금(만원)']], axis=-1),
                 hovertemplate=(
                     '<b>%{x|%Y-%m-%d}</b><br>'
-                    '총자산: %{y:,.0f}만원<br>'
-                    '수익: %{customdata[1]:+,.0f}만원 (%{customdata[0]:+.2f}%)<extra></extra>'
+                    '자산 %{y:,.0f}만 · 원금 %{customdata[2]:,.0f}만<br>'
+                    '수익 %{customdata[1]:+,.0f}만 (%{customdata[0]:+.2f}%)<extra></extra>'
                 ),
             ))
 
-            # 5) 마지막 점 강조 (현재 위치)
+            # 4) 마지막 점 강조 (현재 위치) - 모바일에서는 텍스트 대신 마커만
             if not df_h.empty:
                 last_x = df_h['날짜'].iloc[-1]
                 last_y = df_h['총자산(만원)'].iloc[-1]
                 fig_line.add_trace(go.Scatter(
                     x=[last_x], y=[last_y],
-                    mode='markers+text', showlegend=False,
-                    marker=dict(color=line_color, size=11, line=dict(color='white', width=2)),
-                    text=[f" {last_y:,.0f}만 ({curr_return_pct:+.1f}%)"],
-                    textposition='middle right',
-                    textfont=dict(color=line_color, size=12, family="Arial Black"),
-                    hoverinfo='skip',
+                    mode='markers', showlegend=False,
+                    marker=dict(color=line_color, size=12, line=dict(color='white', width=2)),
+                    hovertemplate=f'<b>현재</b><br>{last_y:,.0f}만 ({curr_return_pct:+.2f}%)<extra></extra>',
                 ))
 
-            # 6) 입금/출금 이벤트 annotation (차트 상단)
+            # 5) 입금/출금 이벤트 — 수직선 + 작은 아이콘만 (금액은 hover로)
             if not events_df.empty:
+                dep_x, dep_y, dep_text = [], [], []
+                wit_x, wit_y, wit_text = [], [], []
                 for _, ev in events_df.iterrows():
                     ev_date = ev['날짜']
                     ev_type = ev['구분']
                     ev_amt = ev['금액(원)'] / 10000
-                    # 이벤트 날짜가 차트 범위 밖이면 스킵
                     if ev_date < df_h['날짜'].iloc[0] or ev_date > df_h['날짜'].iloc[-1]:
                         continue
                     arrow_color = profit_up_color if ev_type == '입금' else profit_down_color
-                    symbol = '▲' if ev_type == '입금' else '▼'
-                    fig_line.add_annotation(
-                        x=ev_date, y=1, yref='paper',
-                        text=f"{symbol} {ev_type} {ev_amt:,.0f}만",
-                        showarrow=False,
-                        font=dict(color=arrow_color, size=10, family="Arial Black"),
-                        bgcolor="rgba(0,0,0,0.3)" if is_dark_mode else "rgba(255,255,255,0.8)",
-                        bordercolor=arrow_color, borderwidth=1, borderpad=2,
-                        yshift=5,
-                    )
-                    # 해당 날짜 수직선
-                    fig_line.add_vline(x=ev_date, line_dash="dot", line_color=arrow_color, opacity=0.3)
+                    # 수직 점선
+                    fig_line.add_vline(x=ev_date, line_dash="dot", line_color=arrow_color, opacity=0.25)
+                    # 마커 위치 (차트 상단 근처, y=paper 좌표는 scatter가 지원 안 하므로 근사값 사용)
+                    if ev_type == '입금':
+                        dep_x.append(ev_date)
+                        dep_text.append(f"입금 +{ev_amt:,.0f}만")
+                    else:
+                        wit_x.append(ev_date)
+                        wit_text.append(f"출금 -{ev_amt:,.0f}만")
 
-            # 7) MDD 발생 지점 마커
+                # 차트 상단 위치 계산 (y축 범위 상단 근처)
+                y_max = float(max(df_h['총자산(만원)'].max(), df_h['누적원금(만원)'].max()))
+                y_min = float(min(df_h['총자산(만원)'].min(), df_h['누적원금(만원)'].min()))
+                y_span = y_max - y_min if y_max > y_min else y_max * 0.1
+                marker_y = y_max + y_span * 0.03  # 상단 살짝 위
+
+                if dep_x:
+                    fig_line.add_trace(go.Scatter(
+                        x=dep_x, y=[marker_y]*len(dep_x),
+                        mode='markers',
+                        marker=dict(symbol='triangle-down', size=12, color=profit_up_color,
+                                    line=dict(color='white', width=1)),
+                        name='입금', showlegend=False,
+                        hovertext=dep_text, hoverinfo='text',
+                    ))
+                if wit_x:
+                    fig_line.add_trace(go.Scatter(
+                        x=wit_x, y=[marker_y]*len(wit_x),
+                        mode='markers',
+                        marker=dict(symbol='triangle-down', size=12, color=profit_down_color,
+                                    line=dict(color='white', width=1)),
+                        name='출금', showlegend=False,
+                        hovertext=wit_text, hoverinfo='text',
+                    ))
+
+            # 6) MDD 발생 지점 마커
             if mdd_idx is not None and mdd_pct < -0.01:
                 mdd_x = df_h.loc[mdd_idx, '날짜']
                 mdd_y = df_h.loc[mdd_idx, '총자산(만원)']
                 fig_line.add_trace(go.Scatter(
                     x=[mdd_x], y=[mdd_y],
                     mode='markers', showlegend=False,
-                    marker=dict(color=profit_down_color, size=10, symbol='triangle-down',
+                    marker=dict(color=profit_down_color, size=11, symbol='triangle-down',
                                 line=dict(color='white', width=1.5)),
                     hovertemplate=f'<b>MDD {mdd_pct:.2f}%p</b><br>{mdd_date}<extra></extra>',
                 ))
@@ -1626,26 +1679,28 @@ else:
             fig_line.update_layout(
                 template=chart_template,
                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                margin=dict(t=50, b=10, l=10, r=80),  # 오른쪽 여백 늘려서 마지막 라벨 표시
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                yaxis=dict(title="만원", tickformat=",.0f"),
-                xaxis=dict(
-                    type='date',
-                    rangeselector=dict(
-                        buttons=list([
-                            dict(count=1, label="1M", step="month", stepmode="backward"),
-                            dict(count=3, label="3M", step="month", stepmode="backward"),
-                            dict(count=6, label="6M", step="month", stepmode="backward"),
-                            dict(count=1, label="1Y", step="year", stepmode="backward"),
-                            dict(step="all", label="All"),
-                        ]),
-                        bgcolor="rgba(80,80,80,0.3)" if is_dark_mode else "rgba(230,230,230,0.8)",
-                        font=dict(size=10),
-                    ),
-                ),
-                hovermode='x unified',
+                margin=dict(t=10, b=10, l=10, r=10),  # 여백 최소화
+                showlegend=False,  # 범례 제거 (모바일 공간 절약)
+                yaxis=dict(title=None, tickformat=",.0f", ticksuffix="만"),  # 타이틀 제거, 눈금에 단위
+                xaxis=dict(type='date', title=None),  # rangeselector 제거
+                hovermode='closest',  # 'x unified' 대신 'closest'로 단순화
+                height=380,  # 고정 높이 (모바일에서 너무 작아지지 않게)
             )
-            st.plotly_chart(fig_line, use_container_width=True)
+
+            # 모바일에서 rangeselector 숨김 (CSS) + 차트 터치 개선
+            st.markdown("""
+            <style>
+            @media (max-width: 640px) {
+                .js-plotly-plot .plotly .rangeselector { display: none !important; }
+                .js-plotly-plot .plotly .modebar { display: none !important; }
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            st.plotly_chart(fig_line, use_container_width=True, config={
+                'displayModeBar': False,  # Plotly 도구 모음 숨김
+                'staticPlot': False,
+            })
 
             # ---- 자동 감지된 자금흐름 expander ----
             with st.expander(f"🔍 자동 감지된 자금흐름 ({len(events_df)}건)"):
