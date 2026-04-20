@@ -680,7 +680,13 @@ def get_usd_krw_rate():
 
 @st.cache_data(ttl=30)
 def get_all_market_data(tickers_tuple):
-    """⚡ 전종목 시세 — Yahoo 배치(한국+해외 통합) + 네이버 병렬"""
+    """⚡ 전종목 시세 — 해외는 Yahoo 배치, 한국은 네이버 우선 (실시간성 ↑)
+
+    이전 버전은 한국 종목도 Yahoo v7 배치에 포함시켰는데, Yahoo는
+    한국 시장 데이터를 15~20분 지연 제공한다. 장중 실시간성이 필요한
+    잔고/상세표에서는 전광판과 동일하게 네이버를 우선 사용한다.
+    네이버가 죽었을 때만 Yahoo 폴백(_fetch_kr_adaptive 내부 로직).
+    """
     results = {}
     tickers = list(tickers_tuple)
 
@@ -688,38 +694,30 @@ def get_all_market_data(tickers_tuple):
     kr_tickers = [t for t in tickers if t.endswith('.KS') or t.endswith('.KQ')]
     yahoo_tickers = [t for t in tickers if t not in kr_tickers]
 
-    # 1) Yahoo 배치: 해외 + 한국 종목 한꺼번에 (1회 HTTP)
-    all_yahoo_batch_tickers = yahoo_tickers + kr_tickers
-    batch = {}
-    if all_yahoo_batch_tickers:
-        batch = _yahoo_batch_quotes(all_yahoo_batch_tickers, timeout=4)
-        missing_batch = [t for t in all_yahoo_batch_tickers if t not in batch]
+    # 1) 해외 종목만 Yahoo v7 배치 (1회 HTTP)
+    if yahoo_tickers:
+        batch = _yahoo_batch_quotes(yahoo_tickers, timeout=4)
+        missing_batch = [t for t in yahoo_tickers if t not in batch]
         if missing_batch:
             batch.update(_yahoo_batch_chart(missing_batch, timeout=3))
 
-    for t in yahoo_tickers:
-        if t in batch:
-            curr, prev = batch[t]
-            cpct = ((curr - prev) / prev * 100) if prev else 0
-            results[t] = (curr, cpct)
+        for t in yahoo_tickers:
+            if t in batch:
+                curr, prev = batch[t]
+                cpct = ((curr - prev) / prev * 100) if prev else 0
+                results[t] = (curr, cpct)
 
-    for t in kr_tickers:
-        if t in batch:
-            curr, prev = batch[t]
-            cpct = ((curr - prev) / prev * 100) if prev else 0
-            results[t] = (curr, cpct)
-
-    # 2) 한국 종목 중 Yahoo 배치에 없는 것 → 네이버 적응형 개별
-    kr_missing = [t for t in kr_tickers if t not in results or results[t][0] <= 0]
-    if kr_missing:
-        with ThreadPoolExecutor(max_workers=min(len(kr_missing), 6)) as ex:
-            futs = {ex.submit(fetch_single_price, t): t for t in kr_missing}
+    # 2) 한국 종목: 네이버 적응형 병렬 조회 (전광판과 동일 소스)
+    #    _fetch_kr_adaptive가 네이버 신규 → 네이버 레거시 → Yahoo 순으로 폴백
+    if kr_tickers:
+        with ThreadPoolExecutor(max_workers=min(len(kr_tickers), 8)) as ex:
+            futs = {ex.submit(fetch_single_price, t): t for t in kr_tickers}
             for fut in as_completed(futs):
                 t, price, change = fut.result()
                 if price > 0:
                     results[t] = (price, change)
 
-    # 3) 해외 종목 누락분 개별 폴백
+    # 3) 해외 종목 누락분 개별 폴백 (Yahoo 배치 실패 등)
     yahoo_missing = [t for t in yahoo_tickers if t not in results or results[t][0] <= 0]
     if yahoo_missing:
         with ThreadPoolExecutor(max_workers=min(len(yahoo_missing), 6)) as ex:
