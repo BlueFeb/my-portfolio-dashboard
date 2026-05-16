@@ -19,12 +19,18 @@ import re
 import os
 import tempfile
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="내 포트폴리오", layout="wide", page_icon="💎")
 
 SIDEBAR_SETTINGS_FILE = "sidebar_settings.json"
+
+# bot.py와 통일된 환율 폴백 값 (H2)
+FALLBACK_USD_KRW = 1400.0
+# 보유자산 탭 스키마 (bot.py / migrate_holdings.py와 일치)
+HOLDINGS_HEADERS = ["자산군", "종목명", "티커", "통화", "수량", "평균단가", "총매입원가", "최종업데이트"]
 
 # 🔧 파일 쓰기 원자화: 쓰는 중 rerun이 겹쳐도 파일이 깨지지 않도록 tempfile + os.replace
 def _atomic_write_json(path, data):
@@ -557,7 +563,7 @@ def load_data():
         if "google_credentials" not in st.secrets:
             st.error("⚠️ Streamlit secrets에 'google_credentials' 키가 설정되지 않았습니다. "
                      "Streamlit Cloud > Settings > Secrets에서 서비스 계정 JSON을 추가해 주세요.")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         creds_dict = json.loads(st.secrets["google_credentials"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -565,18 +571,24 @@ def load_data():
         SHEET_NAME = "MyPortfolio_DB"
         spreadsheet = client.open(SHEET_NAME)
 
-        # batch_get: 3개 시트를 1회 API 호출로 가져옴 (순차 호출 대비 ~1-2초 절감)
+        # batch_get: 4개 시트를 1회 API 호출로 가져옴
         ws_tx = spreadsheet.worksheet("거래내역")
         ws_history = spreadsheet.worksheet("일별기록")
         try:
             ws_pnl = spreadsheet.worksheet("실현손익")
         except gspread.exceptions.WorksheetNotFound:
             ws_pnl = None
+        try:
+            ws_holdings = spreadsheet.worksheet("보유자산")
+        except gspread.exceptions.WorksheetNotFound:
+            ws_holdings = None
 
         # batch_get으로 한 번에 가져오기
         ranges_to_fetch = [ws_tx.title, ws_history.title]
         if ws_pnl:
             ranges_to_fetch.append(ws_pnl.title)
+        if ws_holdings:
+            ranges_to_fetch.append(ws_holdings.title)
 
         all_data = spreadsheet.values_batch_get(ranges_to_fetch)
         value_ranges = all_data.get('valueRanges', [])
@@ -593,20 +605,28 @@ def load_data():
 
         df_tx = _values_to_df(value_ranges[0].get('values', [])) if len(value_ranges) > 0 else pd.DataFrame()
         df_history = _values_to_df(value_ranges[1].get('values', [])) if len(value_ranges) > 1 else pd.DataFrame()
-        df_pnl = _values_to_df(value_ranges[2].get('values', [])) if len(value_ranges) > 2 else pd.DataFrame()
+        # 인덱스가 동적 (ws_pnl 유무에 따라)
+        idx = 2
+        df_pnl = pd.DataFrame()
+        df_holdings = pd.DataFrame()
+        if ws_pnl and len(value_ranges) > idx:
+            df_pnl = _values_to_df(value_ranges[idx].get('values', []))
+            idx += 1
+        if ws_holdings and len(value_ranges) > idx:
+            df_holdings = _values_to_df(value_ranges[idx].get('values', []))
 
-        return df_tx, df_history, df_pnl
+        return df_tx, df_history, df_pnl, df_holdings
     except json.JSONDecodeError as e:
         st.error(f"⚠️ 구글 서비스 계정 JSON 파싱 오류: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except gspread.exceptions.SpreadsheetNotFound:
         st.error("⚠️ 'MyPortfolio_DB' 시트를 찾을 수 없습니다. 시트 이름과 서비스 계정 공유 권한을 확인해 주세요.")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     except Exception as e:
         st.error(f"⚠️ 구글 시트 연결 오류: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-df_raw, df_history_raw, df_pnl_raw = load_data()
+df_raw, df_history_raw, df_pnl_raw, df_holdings_raw = load_data()
 df = df_raw.copy()
 df_history = df_history_raw.copy()
 df_pnl = df_pnl_raw.copy()
@@ -675,7 +695,7 @@ def get_usd_krw_rate():
             return rate, ((rate - prev) / prev * 100) if prev else 0
     except Exception:
         pass
-    return 1400.0, 0.0
+    return FALLBACK_USD_KRW, 0.0
 
 
 @st.cache_data(ttl=30)
@@ -1263,11 +1283,10 @@ st.markdown("---")
 if df.empty:
     st.info("아직 거래 내역이 없습니다. 텔레그램 봇으로 거래를 기록해 주세요.")
 else:
+    # 거래내역 정규화 (infer_cash_flows 등에서 여전히 사용됨)
     for col in ['수량', '거래단가', '거래종류', '자산군', '종목명', '티커', '통화']:
         if col not in df.columns: df[col] = 0 if col in ['수량', '거래단가'] else ""
-        
-    import unicodedata
-    
+
     def _normalize_str_col(series):
         """유니코드 정규화 + 모든 종류의 공백 통일 + strip"""
         return (series.astype(str)
@@ -1284,17 +1303,38 @@ else:
     df['수량'] = pd.to_numeric(df['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df['거래단가'] = pd.to_numeric(df['거래단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
     df['계산용수량'] = df.apply(lambda x: x['수량'] if x['거래종류'] == '매수' else -x['수량'], axis=1)
-    
-    holdings = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
-    holdings = holdings[holdings['계산용수량'] > 0].copy()
 
-    buy_df = df[df['거래종류'] == '매수'].copy()
-    buy_df['결제금액'] = buy_df['수량'] * buy_df['거래단가']
-    avg_cost_df = buy_df.groupby(['종목명', '티커'])[['결제금액', '수량']].sum().reset_index()
-    avg_cost_df['평균매입단가'] = (avg_cost_df['결제금액'] / avg_cost_df['수량']).replace([np.inf, -np.inf], 0).fillna(0)
-    
-    holdings = pd.merge(holdings, avg_cost_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
-    holdings['평균매입단가'] = holdings['평균매입단가'].fillna(0)
+    # ============================================================
+    # 🌟 SSOT: holdings는 「보유자산」 탭에서 직접 로드
+    # ============================================================
+    if df_holdings_raw.empty:
+        st.error(
+            "⚠️ 「보유자산」 탭이 비어있거나 존재하지 않습니다.\n\n"
+            "터미널에서 `python migrate_holdings.py --apply` 를 실행하여 "
+            "거래내역 기반으로 보유자산 탭을 초기화해 주세요."
+        )
+        st.stop()
+
+    holdings = df_holdings_raw.copy()
+    # 필수 컬럼 확인
+    for col in HOLDINGS_HEADERS:
+        if col not in holdings.columns:
+            holdings[col] = 0 if col in ['수량', '평균단가', '총매입원가'] else ""
+
+    # 정규화
+    holdings['자산군'] = _normalize_str_col(holdings['자산군']).replace('', '주식')
+    holdings['종목명'] = _normalize_str_col(holdings['종목명']).replace('', '알수없음')
+    holdings['티커'] = _normalize_str_col(holdings['티커'])
+    holdings['통화'] = _normalize_str_col(holdings['통화']).str.upper().replace('', 'KRW')
+    holdings['수량'] = pd.to_numeric(holdings['수량'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    holdings['평균단가'] = pd.to_numeric(holdings['평균단가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
+    # 수량 0 이하 행 제거 (혹시 모를 잔재)
+    holdings = holdings[holdings['수량'] > 0].copy()
+
+    # 기존 코드 호환 alias (계산용수량, 평균매입단가)
+    holdings['계산용수량'] = holdings['수량']
+    holdings['평균매입단가'] = holdings['평균단가']
 
     unique_tickers = list(holdings['티커'].unique())
     # KRW=X는 별도 5분 캐시로 분리 (불필요한 갱신 절감)
@@ -1304,7 +1344,7 @@ else:
 
     usd_krw_price, usd_krw_change = get_usd_krw_rate()
     market_data_dict["KRW=X"] = (usd_krw_price, usd_krw_change)
-    if usd_krw_price <= 0.0: usd_krw_price = 1400.0
+    if usd_krw_price <= 0.0: usd_krw_price = FALLBACK_USD_KRW
 
     realtime_prices, total_values_krw, total_costs_krw, profit_pcts, profit_amounts = [], [], [], [], []
     _price_failed_tickers = []
@@ -1930,6 +1970,54 @@ else:
         st.caption(f"네이버 신규: {nv} | 레거시: {nvl} | Yahoo 배치+yfinance 폴백: 항상 활성")
         if not _src.get("naver_ok") and not _src.get("naver_legacy_ok"):
             st.caption("⚠️ 네이버 API 모두 차단 상태 → Yahoo Finance(yfinance)로 한국 종목 조회 중. 5분 후 네이버 재시도.")
+
+        # 거래내역 ↔ 보유자산 정합성 체크 (SSOT 신뢰성 확보용)
+        st.markdown("---")
+        st.caption("**🔍 거래내역 ↔ 보유자산 정합성**")
+        try:
+            # 거래내역 기반 재계산
+            recalc = df.groupby(['자산군', '종목명', '티커', '통화'])['계산용수량'].sum().reset_index()
+            recalc = recalc[recalc['계산용수량'] > 1e-9].copy()
+
+            buy_df = df[df['거래종류'] == '매수'].copy()
+            buy_df['결제금액'] = buy_df['수량'] * buy_df['거래단가']
+            avg_df = buy_df.groupby(['종목명', '티커'])[['결제금액', '수량']].sum().reset_index()
+            avg_df['평균매입단가'] = (avg_df['결제금액'] / avg_df['수량']).replace([np.inf, -np.inf], 0).fillna(0)
+            recalc = pd.merge(recalc, avg_df[['종목명', '티커', '평균매입단가']], on=['종목명', '티커'], how='left')
+            recalc['평균매입단가'] = recalc['평균매입단가'].fillna(0)
+
+            # 비교
+            diff_lines = []
+            recalc_set = set(recalc['티커'].tolist())
+            holdings_set = set(holdings['티커'].tolist())
+
+            for t in recalc_set | holdings_set:
+                rec_row = recalc[recalc['티커'] == t]
+                hold_row = holdings[holdings['티커'] == t]
+                if rec_row.empty:
+                    diff_lines.append(f"⚠️ 보유자산에만 있음: {hold_row['종목명'].iloc[0]} (수량 {hold_row['계산용수량'].iloc[0]:.2f})")
+                    continue
+                if hold_row.empty:
+                    diff_lines.append(f"⚠️ 거래내역엔 있는데 보유자산에 없음: {rec_row['종목명'].iloc[0]} (수량 {rec_row['계산용수량'].iloc[0]:.2f})")
+                    continue
+                qty_diff = abs(float(hold_row['계산용수량'].iloc[0]) - float(rec_row['계산용수량'].iloc[0]))
+                if qty_diff > 0.001:
+                    diff_lines.append(
+                        f"• {rec_row['종목명'].iloc[0]}: "
+                        f"시트={hold_row['계산용수량'].iloc[0]:.2f}, 재계산={rec_row['계산용수량'].iloc[0]:.2f}"
+                    )
+
+            if not diff_lines:
+                st.success("✅ 거래내역과 보유자산이 일치")
+            else:
+                st.warning(f"⚠️ {len(diff_lines)}건 불일치 (사용자 수동 수정이면 정상)")
+                for d in diff_lines[:10]:
+                    st.caption(d)
+                if len(diff_lines) > 10:
+                    st.caption(f"... 외 {len(diff_lines)-10}건")
+                st.caption("💡 텔레그램에서 `/sync apply` 명령으로 거래내역 기준 강제 재구성 가능 (백업 자동 실행)")
+        except Exception as e:
+            st.caption(f"정합성 체크 실패: {e}")
 
 if auto_refresh:
     # Streamlit 1.37+의 st.fragment(run_every=) 지원 여부 확인
